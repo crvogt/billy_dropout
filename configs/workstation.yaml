@@ -1,0 +1,12 @@
+# Override for x86 workstation + discrete NVIDIA GPU. Inherits default.yaml.
+# Loaded as: scripts/run_experiment.py --config configs/workstation.yaml.
+
+paths:
+  # On non-Jetson hosts the harvested-asset paths likely differ; override here.
+  yolo_weights: "/home/carson/libs/billy_paper/ros-llm-docker/llm-agent/yolo_robot_focused.pt"
+
+llm:
+  model: "qwen2.5vl:7b-instruct-q4_K_M"
+
+perception:
+  device: "cuda"

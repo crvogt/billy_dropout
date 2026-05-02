@@ -1,0 +1,21 @@
+# venv
+.venv/
+venv/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# data
+data/
+runs/
+
+# weights
+*.pt
+!tests/fixtures/*.pt
+
+# editor
+.vscode/
+.idea/
+
+# os
+.DS_Store

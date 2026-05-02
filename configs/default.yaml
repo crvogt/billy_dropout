@@ -1,0 +1,60 @@
+# Canonical config — Jetson Orin Nano 8GB Super (paper results platform).
+# Overrides: configs/agx_dev.yaml, configs/workstation.yaml.
+
+seed: 1337                         # numpy + torch + python-random seed
+
+paths:
+  # Harvested from the existing thesis repo. These exist at scan time;
+  # do not duplicate the files into uagent/.
+  yolo_weights: "/home/carson/libs/billy_paper/ros-llm-docker/llm-agent/yolo_robot_focused.pt"
+  yolo_dropout_weights: null       # set after Branch B training run completes
+  robot_dataset_root: "/home/carson/libs/billy_paper/ros-llm-docker/llm-agent/archive/Yolo_training/robot_dataset"
+  data_root: "data"                # populated by scripts/prepare_dataset.py
+  runs_root: "runs"                # JSONL logs, atomic appends
+
+llm:
+  # Memory footprint reference (Q4_K_M quantization, Ollama):
+  #   qwen2.5vl:7b-instruct-q4_K_M    ~5.0 GB VRAM   ← Orin Nano 8GB default
+  #   llava:7b-q4_K_M                 ~4.5 GB VRAM
+  #   gemma3:4b-it-q4_K_M             ~3.0 GB VRAM   ← fallback if 7B OOMs
+  model: "qwen2.5vl:7b-instruct-q4_K_M"
+  host: "http://localhost:11434"
+  temperature: 0.0                 # Ollama does not fully respect this; see README
+  request_timeout_s: 120
+
+perception:
+  K: 20                            # MC Dropout stochastic forward passes
+  imgsz: 640                       # YOLO inference resolution
+  conf_threshold: 0.25             # ultralytics default; baseline + dropout share it
+  iou_threshold: 0.45
+  device: "cuda"                   # "cuda" or "cpu"
+
+calibration:
+  # Temperature scaling for the deterministic baseline. Fit on
+  # robot_dataset/val/, evaluated by ECE on robot_dataset/test/.
+  temperature: 1.0                 # placeholder; calibrate_baseline.py overwrites
+  ece_n_bins: 15
+
+variance_thresholds:
+  # Cutoffs on epistemic_variance for the variance_aware prompt's
+  # interpretation string. Tuned empirically once dropout-YOLO is trained.
+  low_max: 0.05                    # variance ≤ this → "LOW" (treat as confident)
+  high_min: 0.15                   # variance ≥ this → "HIGH" (treat as uncertain)
+                                   # in between → "MEDIUM"
+
+experiment:
+  conditions: ["baseline", "variance_aware"]
+  trials_per_image: 3              # N — controls LLM stochasticity
+  buckets: ["in_distribution_pos", "in_distribution_neg", "ood"]
+  log_reasoning_chain: true
+
+agent:
+  max_turns: 4                     # cap reasoning loops per command
+  available_tools: ["move_forward", "rotate", "look_around", "report", "defer"]
+
+ros:
+  # Off by default; live_demo.py and scripts/run_experiment.py with
+  # --live flip these on. Experimental harness uses mock tools.
+  enabled: false
+  bridge_host: "localhost"
+  bridge_port: 9090

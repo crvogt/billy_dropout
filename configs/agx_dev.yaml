@@ -1,0 +1,10 @@
+# Override for AGX Orin 64GB development. Inherits configs/default.yaml.
+# Loaded as: scripts/run_experiment.py --config configs/agx_dev.yaml
+# (the loader merges this on top of default.yaml).
+
+llm:
+  # 64GB VRAM ceiling — pick whatever the user passes in.
+  model: "qwen2.5vl:32b-instruct-q4_K_M"
+
+perception:
+  device: "cuda"

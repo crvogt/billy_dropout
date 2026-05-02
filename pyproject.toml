@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uagent"
+version = "0.1.0"
+description = "Uncertainty-gated agent — paper experiment harness"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+  # config + data
+  "pyyaml==6.0.2",                 # YAML config loading
+  "pydantic==2.9.2",               # tool-schema typing + dataclass-style validation
+
+  # perception
+  "numpy==1.26.4",                 # array math used everywhere
+  "torch==2.4.1",                  # MC Dropout + temperature scaling
+  "ultralytics==8.3.20",           # YOLOv8 wrapper used by harvested weights
+  "opencv-python==4.10.0.84",      # image I/O + panorama stitching path
+
+  # agent
+  "langgraph==0.3.19",             # single-DAG agent runtime; matches thesis pin
+  "langchain-core==0.2.43",        # message types compatible with langgraph 0.3.19
+  "langchain-ollama==0.1.3",       # local-LLM client (Ollama)
+
+  # logging + plotting
+  "matplotlib==3.9.2",             # paper figures only
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.3",                 # tests
+  "pytest-mock==3.14.0",           # mock LLM in agent tests
+]
+ros = [
+  "roslibpy==1.8.1",               # rosbridge client; reused from thesis
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["uagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
