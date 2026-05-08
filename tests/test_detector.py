@@ -61,10 +61,89 @@ def test_mc_dropout_aggregates_correctly(fixture_image: np.ndarray) -> None:
             assert p.epistemic_variance < 1e-9, (
                 f"checkpoint has 0 dropout modules but variance={p.epistemic_variance}"
             )
-    else:  # pragma: no cover — exercised post-Branch-B retraining
+    else:  # pragma: no cover — exercised post-doorway-fine-tune
         assert any(p.epistemic_variance > 0 for p in posts), (
             "dropout modules present but K passes still produced zero variance"
         )
+
+
+STOCK_YOLOV8N = Path("/home/carson/libs/billy_paper/uagent/yolov8n.pt")
+
+
+@pytest.mark.skipif(
+    not STOCK_YOLOV8N.exists(),
+    reason=f"yolov8n.pt missing at {STOCK_YOLOV8N} (run any train script first)",
+)
+def test_mc_dropout_predict_with_injection_produces_variance() -> None:
+    """K=20 passes through the production MCDropoutYOLO.predict path
+    must produce non-identical raw outputs when dropout is active.
+
+    Regression test for the predict()-eval-reset bug: previously
+    ``ultralytics.YOLO.predict()`` reset the model to eval mode after
+    ``_enable_dropout_only`` ran, making K passes deterministic. The
+    Option-A fix bypasses the Predictor pipeline. This test exercises
+    the new path end-to-end without requiring a fine-tuned checkpoint
+    on disk: it loads stock yolov8n.pt, injects dropout in-place, and
+    runs through the production predict.
+    """
+    import torch  # noqa: F401 (used by predict via lazy import)
+
+    from uagent.perception.dropout import (
+        count_dropout_modules,
+        inject_dropout_into_yolov8_cls_head,
+    )
+
+    det = MCDropoutYOLO(STOCK_YOLOV8N, K=20, device="cpu")
+    inject_dropout_into_yolov8_cls_head(det.yolo.model, p=0.25)
+    det._n_dropout_modules = count_dropout_modules(det.yolo.model)
+    assert det._n_dropout_modules == 6
+
+    rng = np.random.default_rng(seed=0)
+    img = rng.integers(0, 255, size=(480, 640, 3), dtype=np.uint8)
+
+    # Two assertions: (1) the raw forward path with our preprocess + NMS
+    # produces non-deterministic outputs across K passes, (2) the
+    # production predict() method itself produces at least one Posterior
+    # with non-zero variance. The second catches bugs in aggregation /
+    # names lookup / scale_boxes that the first would miss.
+
+    # (1) Raw forward smoke
+    pass_confs: list[list[float]] = []
+    tensor, orig_hw = det._preprocess(img, det.imgsz)
+    from ultralytics.utils.ops import non_max_suppression
+    from uagent.perception.dropout import enable_dropout_train_mode
+
+    for _ in range(det.K):
+        enable_dropout_train_mode(det.yolo.model)
+        with torch.no_grad():
+            raw = det.yolo.model(tensor)
+        preds = raw[0] if isinstance(raw, (tuple, list)) else raw
+        nms = non_max_suppression(preds, conf_thres=0.001, iou_thres=det.iou_threshold)
+        dets = nms[0]
+        confs = dets[:, 4].cpu().tolist() if (dets is not None and len(dets) > 0) else []
+        pass_confs.append(confs)
+
+    distinct = {tuple(round(c, 6) for c in confs) for confs in pass_confs}
+    assert len(distinct) > 1, (
+        f"K={det.K} raw-path passes produced identical confidence vectors; "
+        "dropout is not active in the underlying forward"
+    )
+
+    # (2) Production predict() — exercises aggregation end-to-end.
+    # Use a low conf threshold so detections survive on the random image.
+    det.conf_threshold = 0.001
+    posts = det.predict(img)
+    if posts:
+        assert any(p.epistemic_variance > 0 for p in posts), (
+            "MCDropoutYOLO.predict aggregated K passes into Posteriors with "
+            "all-zero epistemic_variance despite raw forward being stochastic; "
+            "bug in aggregation or call-site"
+        )
+    else:
+        # No posteriors usually means pass 0 had no detections; the
+        # _aggregate logic returns [] in that case. The raw-forward
+        # assertion above already proved dropout is firing.
+        pass
 
 
 @pytest.mark.skipif(not WEIGHTS.exists(), reason=f"weights missing: {WEIGHTS}")

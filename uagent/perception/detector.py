@@ -28,6 +28,28 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_device(requested: str) -> str:
+    """If 'cuda' is requested but unavailable, fall back to CPU with a warning.
+
+    Avoids a confusing ``RuntimeError`` on the first ``.to(device)`` call
+    when running on a dev box without working CUDA. Used by both detector
+    constructors.
+    """
+    import warnings
+
+    import torch
+
+    if requested == "cuda" and not torch.cuda.is_available():
+        warnings.warn(
+            "device='cuda' requested but torch.cuda.is_available() is False; "
+            "falling back to device='cpu'.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return "cpu"
+    return requested
+
+
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -91,6 +113,13 @@ class MCDropoutYOLO:
         self.iou_match_threshold = float(iou_match_threshold)
         self.device = str(device)
 
+        if self.imgsz % 32 != 0:
+            raise ValueError(
+                f"imgsz must be a multiple of 32 for YOLOv8 stride alignment; got {self.imgsz}"
+            )
+
+        self.device = _resolve_device(self.device)
+
         self.yolo = YOLO(str(self.weights_path))
         self._n_dropout_modules: int = self._count_dropout_modules()
 
@@ -115,39 +144,115 @@ class MCDropoutYOLO:
         enable_dropout_train_mode(self.yolo.model)
 
     def predict(self, image: "np.ndarray") -> list[Posterior]:
-        """Run K stochastic passes; return aggregated posteriors.
+        """Run K stochastic forward passes; return aggregated posteriors.
 
-        KNOWN BUG (must fix before step B): ultralytics' ``YOLO.predict``
-        calls ``self.model.eval()`` internally during Predictor setup,
-        which silently resets the Dropout2d modules forced into train
-        mode by ``_enable_dropout_only`` above. The K passes will be
-        deterministic and ``epistemic_variance`` will be 0 across the
-        board. Verified empirically 2026-05-08.
+        Bypasses ultralytics' ``YOLO.predict()`` because the Predictor
+        pipeline calls ``model.eval()`` during setup, which silently
+        resets the Dropout2d modules to eval mode and produces
+        deterministic outputs. We invoke ``self.yolo.model(tensor)``
+        directly and reuse ultralytics' NMS + box-scaling utilities for
+        a like-for-like detection result.
 
-        Two viable fixes — pick one in step B:
-        (a) bypass Predictor: call ``self.yolo.model(tensor)`` directly
-            and reimplement preprocess + NMS using ultralytics utilities.
-        (b) hook the Predictor: register a callback (e.g. via
-            ``self.yolo.add_callback("on_predict_postprocess_start", ...)``
-            or similar) that re-enables dropout train mode after the
-            Predictor's eval() runs but before the forward.
-
-        (a) is more explicit but reimplements logic; (b) keeps the existing
-        path but depends on ultralytics' callback API surface.
+        Verified empirically 2026-05-08 that direct invocation preserves
+        the train-mode dropout flag across the forward pass.
         """
+        import torch
+        from ultralytics.utils.ops import non_max_suppression, scale_boxes
+
+        from uagent.perception.dropout import enable_dropout_train_mode
+
+        self.yolo.model.to(self.device)
+        tensor, orig_hw = self._preprocess(image, self.imgsz)
+        tensor = tensor.to(self.device)
+
+        names = (
+            self.yolo.names if hasattr(self.yolo, "names") else self.yolo.model.names
+        )
+
         all_passes: list[list[dict]] = []
         for _ in range(self.K):
-            self._enable_dropout_only()
-            results = self.yolo.predict(
-                image,
-                imgsz=self.imgsz,
-                conf=self.conf_threshold,
-                iou=self.iou_threshold,
-                device=self.device,
-                verbose=False,
+            enable_dropout_train_mode(self.yolo.model)
+            with torch.no_grad():
+                raw = self.yolo.model(tensor)
+            # Detect.forward in eval mode returns (predictions, features);
+            # raw[0] is the [B, 4+nc, n_anchors] prediction tensor that NMS
+            # consumes. enable_dropout_train_mode flips only the Dropout2d
+            # submodules — the parent training flag stays False, so
+            # the eval-format tuple is what we get.
+            preds = raw[0] if isinstance(raw, (tuple, list)) else raw
+
+            nms_out = non_max_suppression(
+                preds,
+                conf_thres=self.conf_threshold,
+                iou_thres=self.iou_threshold,
             )
-            all_passes.append(_extract_detections(results[0]))
+            dets_t = nms_out[0]  # [n_dets, 6]: xyxy, conf, cls
+
+            if dets_t is None or len(dets_t) == 0:
+                all_passes.append([])
+                continue
+
+            boxes = scale_boxes(
+                (self.imgsz, self.imgsz), dets_t[:, :4], orig_hw
+            )
+
+            pass_dets = []
+            for i in range(len(dets_t)):
+                x1, y1, x2, y2 = boxes[i].cpu().tolist()
+                pass_dets.append(
+                    {
+                        "label": names[int(dets_t[i, 5].item())],
+                        "bbox": (x1, y1, x2, y2),
+                        "confidence": float(dets_t[i, 4].item()),
+                    }
+                )
+            all_passes.append(pass_dets)
+
         return self._aggregate(all_passes)
+
+    @staticmethod
+    def _preprocess(
+        image: "np.ndarray", imgsz: int
+    ) -> "tuple[torch.Tensor, tuple[int, int]]":
+        """Letterbox to (imgsz, imgsz), pad with 114, BGR→RGB, /255 → tensor.
+
+        Returns (tensor[1,3,imgsz,imgsz], original_hw) so scale_boxes can
+        unscale detections back to the source image's coordinate frame.
+
+        Input must be a 3-channel uint8 BGR image (H, W, 3). Grayscale,
+        float, or RGBA inputs are rejected — convert upstream.
+        """
+        import cv2
+        import numpy as np
+        import torch
+
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(
+                f"image must be (H, W, 3) BGR; got shape {image.shape}"
+            )
+        if image.dtype != np.uint8:
+            raise ValueError(
+                f"image must be uint8; got {image.dtype}. Convert upstream."
+            )
+
+        h0, w0 = image.shape[:2]
+        r = min(imgsz / h0, imgsz / w0)
+        new_h, new_w = int(round(h0 * r)), int(round(w0 * r))
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        pad_h = imgsz - new_h
+        pad_w = imgsz - new_w
+        top = pad_h // 2
+        bottom = pad_h - top
+        left = pad_w // 2
+        right = pad_w - left
+        padded = cv2.copyMakeBorder(
+            resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
+        )
+
+        rgb = padded[..., ::-1].copy()
+        tensor = torch.from_numpy(rgb).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+        return tensor, (h0, w0)
 
     def _aggregate(self, all_passes: list[list[dict]]) -> list[Posterior]:
         if not all_passes or not all_passes[0]:
@@ -227,7 +332,7 @@ class DeterministicYOLO:
         self.imgsz = int(imgsz)
         self.conf_threshold = float(conf_threshold)
         self.iou_threshold = float(iou_threshold)
-        self.device = str(device)
+        self.device = _resolve_device(str(device))
 
         self.yolo = YOLO(str(self.weights_path))
 

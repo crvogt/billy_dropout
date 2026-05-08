@@ -9,7 +9,7 @@ paths:
   # on dropouts). Produced by scripts/train_dropout_yolo.py.
   yolo_weights: "models/doorway_yolov8n_dropout.pt"
   yolo_dropout_weights: "models/doorway_yolov8n_dropout.pt"
-  doorway_dataset_root: "data/doordetect_door"   # produced by scripts/prepare_doorway_data.py
+  doorway_dataset_root: "data/doorway_combined"  # produced by scripts/prepare_doorway_data.py
   data_root: "data"                # OOD bucket manifests land under data/manifests/
   runs_root: "runs"                # JSONL logs, atomic appends
 
@@ -65,19 +65,22 @@ ros:
   bridge_host: "localhost"
   bridge_port: 9090
 
+dataset:
+  # scripts/prepare_doorway_data.py — multi-source corpus assembly.
+  split_seed: 1337                 # used for Gibson cap subsample + 80/10/10 split
+  gibson_cap: 1500                 # synthetic-data cap; addendum-locked
+
 training:
   # scripts/train_dropout_yolo.py — fine-tune YOLOv8n with embedded dropout.
   # Run on the AGX Thor (or a workstation GPU); not viable on CPU.
   starting_weights: "yolov8n.pt"   # ultralytics auto-downloads if missing
-  data_yaml: "data/doordetect_door/data.yaml"
+  data_yaml: "data/doorway_combined/data.yaml"
   output_checkpoint: "models/doorway_yolov8n_dropout.pt"
-  epochs: 2                        # smoke value — for a real fine-tune raise
-                                   # to 50-100; spec says "1-2 epochs" but on
-                                   # 251 training images that may underfit.
-                                   # Validate mAP@0.5 on val and iterate.
+  epochs: 75                       # cap — early stopping on patience usually fires
+                                   # well before this on the ~5500-image corpus.
   imgsz: 640
   batch: 16
-  patience: 0                      # disable early stopping for short runs
+  patience: 10                     # epochs without val mAP@0.5 improvement → stop
   device: "cuda"
   dropout_p: 0.25                  # placement fixed in uagent/perception/dropout.py
   project: "runs/train"            # ultralytics writes to runs/train/<name>/
