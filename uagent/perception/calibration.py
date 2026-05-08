@@ -56,18 +56,22 @@ class TemperatureScaler:
         logits_t = torch.from_numpy(logits_a)
         labels_t = torch.from_numpy(labels_a)
 
-        T = torch.nn.Parameter(torch.tensor(1.5, dtype=torch.float32))
-        optimizer = torch.optim.LBFGS([T], lr=0.1, max_iter=max_iter)
+        # Optimize log_T so T = exp(log_T) is positive by construction.
+        # Direct-on-T parameterization let L-BFGS overshoot below 0 on
+        # imbalanced detection-calibration sets.
+        log_T = torch.nn.Parameter(torch.log(torch.tensor(1.5, dtype=torch.float32)))
+        optimizer = torch.optim.LBFGS([log_T], lr=0.1, max_iter=max_iter)
         loss_fn = torch.nn.CrossEntropyLoss()
 
         def closure() -> torch.Tensor:
             optimizer.zero_grad()
-            loss = loss_fn(logits_t / T.clamp(min=1e-3), labels_t)
+            T = torch.exp(log_T)
+            loss = loss_fn(logits_t / T, labels_t)
             loss.backward()
             return loss
 
         optimizer.step(closure)
-        return cls(temperature=float(T.detach().item()))
+        return cls(temperature=float(torch.exp(log_T).detach().item()))
 
     def transform(self, confidence: float) -> float:
         """Apply T to a single binary confidence (sigmoid-space)."""

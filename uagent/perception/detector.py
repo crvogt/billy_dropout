@@ -104,16 +104,37 @@ class MCDropoutYOLO:
         return n
 
     def _enable_dropout_only(self) -> None:
-        """Eval mode for everything; train mode for dropout-class modules only."""
-        import torch.nn as nn
+        """Eval mode for everything; train mode for Dropout2d modules.
 
-        self.yolo.model.eval()
-        for m in self.yolo.model.modules():
-            if isinstance(m, (nn.Dropout, nn.Dropout1d, nn.Dropout2d, nn.Dropout3d, nn.AlphaDropout)):
-                m.train()
+        Delegates to the shared helper in ``uagent.perception.dropout`` so
+        the test suite and the production path use one implementation.
+        Only Dropout2d is relevant for our YOLOv8 placement.
+        """
+        from uagent.perception.dropout import enable_dropout_train_mode
+
+        enable_dropout_train_mode(self.yolo.model)
 
     def predict(self, image: "np.ndarray") -> list[Posterior]:
-        """Run K stochastic passes; return aggregated posteriors."""
+        """Run K stochastic passes; return aggregated posteriors.
+
+        KNOWN BUG (must fix before step B): ultralytics' ``YOLO.predict``
+        calls ``self.model.eval()`` internally during Predictor setup,
+        which silently resets the Dropout2d modules forced into train
+        mode by ``_enable_dropout_only`` above. The K passes will be
+        deterministic and ``epistemic_variance`` will be 0 across the
+        board. Verified empirically 2026-05-08.
+
+        Two viable fixes — pick one in step B:
+        (a) bypass Predictor: call ``self.yolo.model(tensor)`` directly
+            and reimplement preprocess + NMS using ultralytics utilities.
+        (b) hook the Predictor: register a callback (e.g. via
+            ``self.yolo.add_callback("on_predict_postprocess_start", ...)``
+            or similar) that re-enables dropout train mode after the
+            Predictor's eval() runs but before the forward.
+
+        (a) is more explicit but reimplements logic; (b) keeps the existing
+        path but depends on ultralytics' callback API surface.
+        """
         all_passes: list[list[dict]] = []
         for _ in range(self.K):
             self._enable_dropout_only()

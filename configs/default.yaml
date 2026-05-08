@@ -4,12 +4,13 @@
 seed: 1337                         # numpy + torch + python-random seed
 
 paths:
-  # Harvested from the existing thesis repo. These exist at scan time;
-  # do not duplicate the files into uagent/.
-  yolo_weights: "/home/carson/libs/billy_paper/ros-llm-docker/llm-agent/yolo_robot_focused.pt"
-  yolo_dropout_weights: null       # set after Branch B training run completes
-  robot_dataset_root: "/home/carson/libs/billy_paper/ros-llm-docker/llm-agent/archive/Yolo_training/robot_dataset"
-  data_root: "data"                # populated by scripts/prepare_dataset.py
+  # The same checkpoint serves both deterministic baseline (eval mode →
+  # dropout is a no-op) and stochastic dropout inference (forced train mode
+  # on dropouts). Produced by scripts/train_dropout_yolo.py.
+  yolo_weights: "models/doorway_yolov8n_dropout.pt"
+  yolo_dropout_weights: "models/doorway_yolov8n_dropout.pt"
+  doorway_dataset_root: "data/doordetect_door"   # produced by scripts/prepare_doorway_data.py
+  data_root: "data"                # OOD bucket manifests land under data/manifests/
   runs_root: "runs"                # JSONL logs, atomic appends
 
 llm:
@@ -30,10 +31,15 @@ perception:
   device: "cuda"                   # "cuda" or "cpu"
 
 calibration:
-  # Temperature scaling for the deterministic baseline. Fit on
-  # robot_dataset/val/, evaluated by ECE on robot_dataset/test/.
+  # Temperature scaling for the deterministic baseline. Fit on the
+  # calibration split of doorway_dataset_root.
   temperature: 1.0                 # placeholder; calibrate_baseline.py overwrites
   ece_n_bins: 15
+  fit_conf_threshold: 0.01         # detector conf cutoff used during T fitting;
+                                   # lower than perception.conf_threshold (0.25)
+                                   # so the fit sees both TPs and FPs. T is fit
+                                   # over [fit_conf_threshold, 1.0] then applied
+                                   # to all post-threshold runtime confidences.
 
 variance_thresholds:
   # Cutoffs on epistemic_variance for the variance_aware prompt's
@@ -58,3 +64,21 @@ ros:
   enabled: false
   bridge_host: "localhost"
   bridge_port: 9090
+
+training:
+  # scripts/train_dropout_yolo.py — fine-tune YOLOv8n with embedded dropout.
+  # Run on the AGX Thor (or a workstation GPU); not viable on CPU.
+  starting_weights: "yolov8n.pt"   # ultralytics auto-downloads if missing
+  data_yaml: "data/doordetect_door/data.yaml"
+  output_checkpoint: "models/doorway_yolov8n_dropout.pt"
+  epochs: 2                        # smoke value — for a real fine-tune raise
+                                   # to 50-100; spec says "1-2 epochs" but on
+                                   # 251 training images that may underfit.
+                                   # Validate mAP@0.5 on val and iterate.
+  imgsz: 640
+  batch: 16
+  patience: 0                      # disable early stopping for short runs
+  device: "cuda"
+  dropout_p: 0.25                  # placement fixed in uagent/perception/dropout.py
+  project: "runs/train"            # ultralytics writes to runs/train/<name>/
+  name: "doorway_yolov8n_dropout"

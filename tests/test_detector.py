@@ -109,3 +109,45 @@ def test_temperature_scaling_reduces_ece() -> None:
     assert ece_post < ece_pre, (
         f"ECE did not improve: pre={ece_pre:.4f} post={ece_post:.4f}"
     )
+
+
+def test_temperature_scaling_one_sided_logits_stays_positive() -> None:
+    """Imbalanced one-sided logits (mostly large positive) — regression test
+    for the parameterization. The original direct-T parameterization let
+    L-BFGS overshoot below zero, which then failed the constructor's T>0
+    check. Mirrors the actual val-set distribution that originally
+    triggered the bug (~120 TP / 60 FP, all logits in [0.5, 6.0]).
+
+    Asserted invariants:
+      - fit() returns without raising (the original failure mode)
+      - T is positive and finite
+      - fitted T reduces NLL relative to T=1.0 (real work, not tautology)
+    """
+    import torch
+
+    rng = np.random.default_rng(seed=2026)
+    n_pos, n_neg = 120, 60
+    pos_logits = rng.uniform(2.0, 6.0, size=n_pos)
+    neg_logits = rng.uniform(0.5, 3.0, size=n_neg)
+
+    logits_np = np.concatenate([pos_logits, neg_logits]).astype(np.float32)
+    labels_np = np.concatenate(
+        [np.ones(n_pos, dtype=np.int64), np.zeros(n_neg, dtype=np.int64)]
+    )
+
+    scaler = TemperatureScaler.fit(logits_np, labels_np)
+
+    assert 1e-3 < scaler.temperature < 100.0, (
+        f"T out of range on imbalanced one-sided logits: T={scaler.temperature}"
+    )
+    assert np.isfinite(scaler.temperature)
+
+    # NLL must improve vs T=1.0; otherwise the fit didn't do real work.
+    logits_t = torch.from_numpy(np.stack([np.zeros_like(logits_np), logits_np], axis=1))
+    labels_t = torch.from_numpy(labels_np)
+    loss_fn = torch.nn.CrossEntropyLoss()
+    nll_unit = float(loss_fn(logits_t, labels_t).item())
+    nll_fit = float(loss_fn(logits_t / scaler.temperature, labels_t).item())
+    assert nll_fit < nll_unit, (
+        f"fitted T did not reduce NLL: unit={nll_unit:.4f} fit={nll_fit:.4f}"
+    )
