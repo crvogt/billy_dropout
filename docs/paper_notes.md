@@ -99,33 +99,46 @@ multi-signal composite (raw posterior + interpretation label + the
 agent's reasoning chain) is what the experiment evaluates, not the
 variance scalar alone.
 
-**Per-source temperature-scaling result is a Discussion-worthy
-finding.** Step C calibration (`runs/calibration_results.json`):
+**Single-temperature calibration on a heterogeneous distribution —
+known failure mode, and the strongest motivation for the variance
+approach.** Step C calibration (`runs/calibration_results.json`):
 
-| Source | n | ECE pre | ECE post | NLL pre | NLL post |
-|---|---|---|---|---|---|
-| aggregate | 1845 | 0.0615 | **0.0510** | 0.3103 | 0.3068 |
-| Giraff-X | 1105 | 0.0779 | **0.0648** | 0.2791 | 0.2698 |
-| Gibson | 552 | 0.0671 | **0.0580** | 0.3554 | 0.3591 |
-| DoorDetect | 188 | 0.0690 | **0.0731** | 0.3615 | 0.3706 |
+| Source | n | share | ECE pre | ECE post | NLL pre | NLL post |
+|---|---|---|---|---|---|---|
+| aggregate | 1845 | — | 0.0615 | **0.0510** | 0.3103 | 0.3068 |
+| Giraff-X | 1105 | 60% | 0.0779 | **0.0648** | 0.2791 | 0.2698 |
+| Gibson | 552 | 30% | 0.0671 | **0.0580** | 0.3554 | 0.3591 |
+| DoorDetect | 188 | **10%** | 0.0690 | **0.0731** | 0.3615 | 0.3706 |
 
 The single temperature scalar (T = 0.859) improves aggregate ECE and
 helps both Antonazzi sources, but *actively worsens* calibration on
-DoorDetect (188 detections, 38 TP / 150 FP — predominantly FP). The
-T<1 sharpening pushes already-confident-but-wrong DoorDetect detections
-further toward 1.0, increasing the gap between predicted probability
-and actual TP rate. Per-source T would partially fix this — but at
-inference time the agent has no signal indicating source membership for
-OOD inputs (that's the whole point of the experiment). Single T is
-operationally correct; the DoorDetect ECE-worsening is exactly the
-miscalibration regime variance signaling is supposed to address.
+DoorDetect — the minority sub-distribution at 10% of the calibration
+mix. This is a known failure mode of single-temperature calibration on
+heterogeneous data: temperature scaling optimizes against the
+calibration set's distribution mix, so sub-distributions that are
+minority in that mix can be made worse, not better, by the fit. The
+finding generalizes beyond our specific dataset: any deployment with
+calibration data that doesn't proportionally match the runtime
+distribution faces the same risk.
 
-**Connecting threads: deterministic calibration cannot fix OOD
-miscalibration; the variance signal does.** The agent experiment in
-Section IV demonstrates whether the LLM can use the variance signal
-productively. This Discussion paragraph links the calibration-side
-empirical observation (T scaling fails on DoorDetect) to the
-agent-side motivation (need a signal robust to source membership).
+Per-source T would partially repair the DoorDetect-specific gap, but
+that solution presumes the deployment system can identify source
+membership at inference time. For genuinely OOD inputs (the case the
+paper is built around), source identity is precisely the unknown.
+
+**This motivates the variance signal as an alternative path to the
+same problem.** Rather than try to predict the right temperature for
+an unknown deployment distribution — a problem temperature scaling
+fundamentally cannot solve when the distribution is open-set — the
+MC Dropout posterior exposes the detector's *intrinsic* uncertainty
+regardless of how the softmax was calibrated. The variance signal
+does not depend on knowing which calibration regime the input fell
+into; it derives from the model's own response to that input. Step B's
+−0.98 competence-variance correlation (Section III) is empirical
+evidence that this intrinsic signal tracks the same generalization
+gradient that defeats deterministic calibration here. The agent
+experiment in Section IV evaluates whether the LLM can act on this
+signal productively when categorical calibration breaks down.
 
 ## Open question (do not resolve in advance)
 

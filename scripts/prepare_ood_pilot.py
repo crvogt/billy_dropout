@@ -67,11 +67,23 @@ DISTRACTOR_CLASSES = {
     "/m/0d4v4":  "Window",
 }
 ENV_SHIFT_CLASSES = {
-    "/m/0cgh4":  "Building",
-    "/m/03jm5":  "House",
-    "/m/079cl":  "Skyscraper",
-    "/m/021sj1": "Office building",  # was /m/0pg52 (Taxi) — initial guess wrong
+    "/m/0cgh4":  "Building",          # 984 val annotations
+    "/m/03jm5":  "House",             # 246
+    "/m/079cl":  "Skyscraper",        # 57
+    "/m/021sj1": "Office building",   # 45  (verified MID; addendum gave none)
+    "/m/01fdzj": "Tower",             # 82  (added: exterior landmark)
+    "/m/0d5gx":  "Castle",            # 12
+    "/m/04h7h":  "Lighthouse",        # 8
+    "/m/0crjs":  "Convenience store", # 65  (storefront → exterior context)
 }
+
+# Bucket-assignment precedence when an image qualifies for multiple buckets.
+# distractors uses disjoint LabelName classes from partial/novel, so its
+# position here is structurally inert. The real claim is novel-before-partial:
+# both pull from the Door class, and overlap is possible whenever a Door has
+# an env-shift co-annotation AND meets the size/aspect tail constraint —
+# higher-priority bucket wins.
+BUCKET_PRIORITY = ("distractors", "novel", "partial")
 
 # Filter thresholds.
 DISTRACTOR_ASPECT_HW_MIN = 1.0
@@ -318,6 +330,13 @@ def main() -> None:
     p.add_argument(
         "--n-per-bucket", type=int, default=N_PER_BUCKET, help="images per sub-bucket"
     )
+    p.add_argument(
+        "--exclude-manifest",
+        default=None,
+        help="optional path to an existing manifest.json whose image_ids "
+             "should also be excluded (e.g. data/ood_pilot/manifest.json "
+             "when building the full set so it doesn't reuse pilot images)",
+    )
     args = p.parse_args()
 
     cfg_path = Path(args.config).resolve()
@@ -356,6 +375,22 @@ def main() -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         excluded_ids = set(manifest.get("doordetect", {}).get("open_images_ids", []))
     print(f"  {len(excluded_ids)} training image IDs to exclude")
+    if args.exclude_manifest:
+        extra_path = (repo_root / args.exclude_manifest).resolve()
+        if not extra_path.exists():
+            sys.exit(f"--exclude-manifest path not found: {extra_path}")
+        try:
+            extra = json.loads(extra_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            sys.exit(f"--exclude-manifest is not valid JSON: {extra_path} ({e})")
+        if not isinstance(extra, list):
+            sys.exit(
+                f"--exclude-manifest must contain a JSON array of objects with "
+                f"an 'image_id' key; got {type(extra).__name__} at {extra_path}"
+            )
+        extra_ids = {entry["image_id"] for entry in extra if isinstance(entry, dict) and "image_id" in entry}
+        excluded_ids |= extra_ids
+        print(f"  + {len(extra_ids)} image IDs from {extra_path} ({len(excluded_ids)} total exclusions)")
 
     # 3. Parse bbox CSV.
     print("--- parsing bbox annotations ---")
@@ -375,15 +410,22 @@ def main() -> None:
         unique_ids = len({c.image_id for c in cands})
         print(f"  {bucket}: {len(cands)} candidate annotations across {unique_ids} unique images")
 
-    # 5. Select top-N per bucket.
+    # 5. Select top-N per bucket, with cross-bucket dedup by precedence.
+    # novel ⊂ partial (both Door class with overlapping conditions). Without
+    # this, deterministic largest-area selection picks the same Doors for
+    # both, double-counting image_ids in the output.
     selected_by_bucket: dict[str, list[Candidate]] = {}
-    for bucket, cands in candidates_by_bucket.items():
+    claimed_ids: set[str] = set()
+    for bucket in BUCKET_PRIORITY:
+        cands = [c for c in candidates_by_bucket[bucket] if c.image_id not in claimed_ids]
         chosen = _select_top_n_per_image(cands, args.n_per_bucket)
         selected_by_bucket[bucket] = chosen
+        claimed_ids.update(c.image_id for c in chosen)
         if len(chosen) < args.n_per_bucket:
             print(
                 f"  WARNING: only {len(chosen)} unique images for bucket '{bucket}' "
-                f"(requested {args.n_per_bucket}). Filter may be too strict."
+                f"(requested {args.n_per_bucket}). Filter may be too strict, "
+                "or higher-priority buckets claimed shared candidates."
             )
 
     # 6. Look up image URLs.
