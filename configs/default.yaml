@@ -33,7 +33,7 @@ perception:
 calibration:
   # Temperature scaling for the deterministic baseline. Fit on the
   # calibration split of doorway_dataset_root.
-  temperature: 1.0                 # placeholder; calibrate_baseline.py overwrites
+  temperature: 0.8588                 # placeholder; calibrate_baseline.py overwrites
   ece_n_bins: 15
   fit_conf_threshold: 0.01         # detector conf cutoff used during T fitting;
                                    # lower than perception.conf_threshold (0.25)
@@ -42,11 +42,21 @@ calibration:
                                    # to all post-threshold runtime confidences.
 
 variance_thresholds:
-  # Cutoffs on epistemic_variance for the variance_aware prompt's
-  # interpretation string. Tuned empirically once dropout-YOLO is trained.
-  low_max: 0.05                    # variance ≤ this → "LOW" (treat as confident)
-  high_min: 0.15                   # variance ≥ this → "HIGH" (treat as uncertain)
-                                   # in between → "MEDIUM"
+  # Cutoffs on epistemic_variance mapping to the variance_aware prompt's
+  # categorical interpretation label (LOW / MEDIUM / HIGH). Recalibrated
+  # 2026-05-11 against runs/step_b/summary.json, which observed:
+  #   ID confident-correct median  = 0.0026  (IQR 0.0014–0.0049)
+  #   OOD pilot median             = 0.0085  (IQR 0.0035–0.0181)
+  # The original (low_max=0.05, high_min=0.15) values were ~10x too high;
+  # under realised variance, the HIGH band would have been unreachable.
+  low_max: 0.003                   # variance ≤ this → "LOW" (treat as confident).
+                                   #   Matches the upper edge of typical
+                                   #   confident-correct ID variance.
+  high_min: 0.010                  # variance ≥ this → "HIGH" (treat as uncertain).
+                                   #   Matches the lower edge of the OOD pilot's
+                                   #   upper IQR (Q3=0.018); a confident detection
+                                   #   above this threshold is materially uncertain.
+                                   # variance in (low_max, high_min) → "MEDIUM".
 
 experiment:
   conditions: ["baseline", "variance_aware"]
