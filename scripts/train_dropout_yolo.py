@@ -95,6 +95,81 @@ def main() -> None:
 
     output_ckpt.parent.mkdir(parents=True, exist_ok=True)
 
+    # ---- callback-based dropout re-injection ----
+    # YOLO.train() rebuilds self.trainer.model from yolo.model.yaml + the
+    # in-memory state_dict. The rebuild discards architectural mods that
+    # aren't in the YAML — including our six Dropout2d modules — so the
+    # in-memory injection above evaporates by the time training starts.
+    #
+    # We re-inject inside an `on_pretrain_routine_start` callback which
+    # fires AFTER the rebuild but BEFORE ModelEMA construction, so the
+    # EMA snapshot and every saved checkpoint thereafter contain the
+    # dropout modules. Verified empirically against ultralytics 8.3.20.
+    def _reinject_into_trainer(trainer) -> None:
+        existing = count_dropout_modules(trainer.model)
+        if existing == 0:
+            n = inject_dropout_into_yolov8_cls_head(trainer.model, p=dropout_p)
+            print(
+                f"[callback on_pretrain_routine_start] injected {n} "
+                "Dropout2d modules into trainer.model (post-rebuild)"
+            )
+        else:
+            print(
+                f"[callback on_pretrain_routine_start] trainer.model already "
+                f"has {existing} Dropout2d modules; skipping injection"
+            )
+
+    def _verify_dropout_active(trainer) -> None:
+        n = count_dropout_modules(trainer.model)
+        if n != 6:
+            raise RuntimeError(
+                f"dropout missing from trainer.model at training start: "
+                f"count={n}, expected 6. Callback ordering may have changed "
+                "in this ultralytics version — investigate before relying on "
+                "the checkpoint."
+            )
+        # EMA snapshot must also have dropouts. If ModelEMA was constructed
+        # before our inject callback fired (e.g. a future ultralytics reorder),
+        # save_model will serialize a dropout-less EMA and the round-trip
+        # check would only catch it post-training. Pre-flight here.
+        ema = getattr(trainer, "ema", None)
+        ema_module = getattr(ema, "ema", None) if ema is not None else None
+        if ema_module is not None:
+            n_ema = count_dropout_modules(ema_module)
+            if n_ema != 6:
+                raise RuntimeError(
+                    f"EMA snapshot is dropout-less: count={n_ema}, expected 6. "
+                    "ModelEMA was likely constructed before the inject callback "
+                    "fired — ultralytics callback ordering has changed."
+                )
+            print(
+                f"[callback on_train_start] verified Dropout2d count: "
+                f"{n} (model), {n_ema} (ema)"
+            )
+        else:
+            # On single-GPU runs (our case on Thor), ultralytics always
+            # constructs ModelEMA in _setup_train. If we get here, ultralytics
+            # behavior has changed in a way that bypasses EMA — fail loudly
+            # rather than ship a checkpoint whose EMA copy is dropout-less.
+            raise RuntimeError(
+                "trainer.ema is missing or unset at on_train_start. "
+                "ultralytics ordinarily constructs ModelEMA before this "
+                "callback fires; the absence here indicates a version skew "
+                "that needs investigation before relying on the checkpoint."
+            )
+
+    yolo.add_callback("on_pretrain_routine_start", _reinject_into_trainer)
+    yolo.add_callback("on_train_start", _verify_dropout_active)
+
+    # Capture mtime of any pre-existing best.pt so we can detect a stale
+    # checkpoint (this run crashed before producing a new one and we'd
+    # otherwise reload the previous run's output silently).
+    weights_dir = project / run_name / "weights"
+    prior_best = weights_dir / "best.pt"
+    prior_last = weights_dir / "last.pt"
+    prior_best_mtime = prior_best.stat().st_mtime if prior_best.exists() else 0.0
+    prior_last_mtime = prior_last.stat().st_mtime if prior_last.exists() else 0.0
+
     print(
         f"starting fine-tune: epochs={epochs} imgsz={imgsz} batch={batch} "
         f"device={device} data={data_yaml}"
@@ -112,14 +187,28 @@ def main() -> None:
         verbose=True,
     )
 
-    best = project / run_name / "weights" / "best.pt"
+    best = weights_dir / "best.pt"
     if not best.exists():
-        last = project / run_name / "weights" / "last.pt"
+        last = weights_dir / "last.pt"
         if last.exists():
+            if last.stat().st_mtime <= prior_last_mtime:
+                sys.exit(
+                    f"last.pt at {last} was not updated by this run "
+                    f"(mtime {last.stat().st_mtime} <= prior {prior_last_mtime}). "
+                    "A previous failed run may have left a stale checkpoint. "
+                    f"Delete {weights_dir} and re-run."
+                )
             print(f"best.pt missing; falling back to last.pt at {last}")
             best = last
         else:
             sys.exit(f"no checkpoint at {best} or last.pt; training failed silently?")
+    elif best.stat().st_mtime <= prior_best_mtime:
+        sys.exit(
+            f"best.pt at {best} was not updated by this run "
+            f"(mtime {best.stat().st_mtime} <= prior {prior_best_mtime}). "
+            "A previous failed run may have left a stale checkpoint. "
+            f"Delete {weights_dir} and re-run."
+        )
 
     # Round-trip sanity check: reload the saved checkpoint and verify the
     # dropout modules survived ultralytics' serialization. Tight invariant —
