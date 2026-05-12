@@ -267,7 +267,7 @@ def main() -> None:
                     for line in chain.splitlines():
                         print(f"      {line}")
                 else:
-                    print("    reasoning: (none — model emitted tool call only)")
+                    print("    reasoning: (none — empty thought channel or tool-call-only response)")
             except Exception as e:
                 n_crashes += 1
                 print(f"  [{i}/{len(test2_items)}] CRASH {it.image_path.name}: {e}")

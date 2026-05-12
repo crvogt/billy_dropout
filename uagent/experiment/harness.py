@@ -38,9 +38,15 @@ from typing import Any
 
 import cv2
 
+from uagent.agent.parsing import parse_thought_channel as parse_thought_channel
 from uagent.agent.runtime import build_runtime
 from uagent.perception.calibration import TemperatureScaler
 from uagent.perception.posterior import Detection, Posterior
+
+# `parse_thought_channel` is re-exported above so callers can continue
+# importing it from `uagent.experiment.harness` per the Step F directive,
+# while the implementation lives in `uagent.agent.parsing` to avoid a
+# circular import with `uagent.agent.runtime`.
 
 
 # ---------------------------------------------------------------------------

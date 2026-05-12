@@ -147,6 +147,81 @@ def test_move_forward_loops_with_feedback() -> None:
     assert "0.30 m" in second_user_msg
 
 
+def test_thought_channel_lands_in_reasoning_chain() -> None:
+    """Mock LLM emits content with a thought block + a tool call; the
+    runtime should extract the thought into reasoning_chain rather than
+    storing the raw content. Closes the coverage gap created when the
+    raw-content fallback was removed from agent_reason."""
+
+    class _ThoughtLLM:
+        def bind_tools(self, tools: list) -> "_ThoughtLLM":
+            return self
+
+        def invoke(self, messages: list) -> AIMessage:
+            return AIMessage(
+                content="<|channel>thought\nthe model thought this\n<channel|>",
+                tool_calls=[{"name": "defer", "args": {"reason": "x"}, "id": "id1"}],
+            )
+
+    perceiver = MockBaselinePerceiver([
+        Detection(label="robot", bbox=(100, 100, 200, 200), confidence=0.85),
+    ])
+    runtime = build_runtime(
+        condition="baseline",
+        perceiver=perceiver,
+        llm=_ThoughtLLM(),
+        variance_thresholds=THRESHOLDS,
+        max_turns=4,
+        live_tools=False,
+    )
+    result = runtime.invoke({
+        "image": np.zeros((10, 10, 3), dtype=np.uint8),
+        "user_command": "test",
+    })
+    assert result["reasoning_chain"] == "the model thought this"
+    assert result["final_action"] == "defer"
+
+
+def test_no_tool_call_strips_thought_from_defer_reason() -> None:
+    """If the model emits a thought block but no tool call, the dispatcher's
+    implicit-defer path must scrub the thought out of final_args.reason —
+    otherwise internal reasoning leaks into a field other tooling treats as
+    user-facing."""
+
+    class _NoToolThoughtLLM:
+        def bind_tools(self, tools: list) -> "_NoToolThoughtLLM":
+            return self
+
+        def invoke(self, messages: list) -> AIMessage:
+            return AIMessage(
+                content=(
+                    "<|channel>thought\nsecret internal reasoning\n<channel|>\n"
+                    "Visible final answer."
+                ),
+                tool_calls=[],
+            )
+
+    perceiver = MockBaselinePerceiver([
+        Detection(label="robot", bbox=(100, 100, 200, 200), confidence=0.85),
+    ])
+    runtime = build_runtime(
+        condition="baseline",
+        perceiver=perceiver,
+        llm=_NoToolThoughtLLM(),
+        variance_thresholds=THRESHOLDS,
+        max_turns=4,
+        live_tools=False,
+    )
+    result = runtime.invoke({
+        "image": np.zeros((10, 10, 3), dtype=np.uint8),
+        "user_command": "test",
+    })
+    assert result["final_action"] == "defer"
+    assert result["final_args"]["reason"] == "Visible final answer."
+    # And the thought DID land in reasoning_chain.
+    assert "secret internal reasoning" in result["reasoning_chain"]
+
+
 def test_prompt_conditions_differ_on_same_posterior() -> None:
     """Pure prompt-rendering test; no LLM, no graph."""
     det = Detection(label="robot", bbox=(320, 240, 480, 400), confidence=0.78)

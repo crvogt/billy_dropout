@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
+from uagent.agent.parsing import parse_thought_channel, strip_thought_channel
 from uagent.agent.prompts import (
     gate_from_variance,
     render_baseline_detection,
@@ -192,8 +193,16 @@ def build_runtime(
         messages = [SystemMessage(sys_text), HumanMessage(user_content)]
         response: AIMessage = bound_llm.invoke(messages)
         chain = state.get("reasoning_chain", "")
-        if response.content:
-            chain = (chain + "\n" if chain else "") + str(response.content)
+        # Extract the Gemma 4 thought channel. A missing/malformed block
+        # yields "" (per parse_thought_channel's contract) — we DO NOT
+        # fall back to raw response.content here because that would hide
+        # a real model-misbehavior signal (thinking enabled but no
+        # thought channel emitted) behind plausible-looking text. An
+        # empty agent_reasoning_chain across many events is a metric
+        # the analysis layer can surface.
+        thought = parse_thought_channel(response.content)
+        if thought:
+            chain = (chain + "\n\n" if chain else "") + thought
         return {
             "messages": state.get("messages", []) + [response],
             "reasoning_chain": chain,
@@ -205,8 +214,13 @@ def build_runtime(
 
         if not tool_calls:
             # No tool call → treat as implicit defer with the model's text as reason.
+            # Strip any thought-channel block so the defer reason holds only the
+            # model's final answer; raw content would leak internal reasoning
+            # into final_args["reason"] (which other tooling treats as user-
+            # facing) and double-up on agent_reasoning_chain.
             from uagent.agent.tools import DeferInput, defer as defer_fn
-            text = str(last.content) if getattr(last, "content", None) else "no tool call emitted"
+            raw = last.content if getattr(last, "content", None) else ""
+            text = strip_thought_channel(raw) or "no tool call emitted"
             res = defer_fn(DeferInput(reason=text), live=live_tools)
             new_turn = state["turn"] + 1
             return {

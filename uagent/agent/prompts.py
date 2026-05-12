@@ -18,9 +18,23 @@ from uagent.perception.posterior import Detection, GateDecision, Posterior
 
 # ---------------------------------------------------------------------------
 # Shared prefix — identical across conditions.
+#
+# `<|think|>` is Gemma 4's literal control token to enable structured
+# thinking mode. It MUST be the very first content of the system message,
+# before any other character. With it present, the model emits responses
+# of the form `<|channel>thought\n...\n<channel|>\n<final answer or tool>`;
+# we parse the thought block out in harness.parse_thought_channel.
+#
+# Per the Google docs, larger Gemma 4 models can behave unstably without
+# this token even when thinking is otherwise disabled, so we apply it
+# uniformly across both experimental conditions (the only meaningful
+# inter-condition difference remains the variance-aware addendum below).
+# Refs: https://ollama.com/library/gemma4
+#       https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT_BASE = """\
+<|think|>
 You control a wheeled mobile robot. Your task: navigate toward a
 doorway when one is visible. You receive perception results from a
 camera-based detector and decide what action to take next.
