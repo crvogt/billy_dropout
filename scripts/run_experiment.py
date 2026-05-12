@@ -22,21 +22,38 @@ original.
 
 Smoke mode
 ----------
---smoke sets n_per_bucket=5, trials_per_image=1, and uses the
-single LLM in `llm.model`. Use to verify the harness end-to-end on a
-small workload before launching the full sweep.
+--smoke sets n_per_bucket=5, trials_per_image=1, and uses the default
+tier's model (configs/default.yaml::llm.default_tier). Use to verify
+the harness end-to-end before launching the full sweep.
+
+Model selection
+---------------
+--models accepts either tier names (resolved against
+`llm.models.{small,medium,large}` in the config) or raw Ollama tags.
+Tier names are convenient for the sweep:
+
+    --models small
+    --models small medium large
+
+Raw tags still work for one-offs:
+
+    --models qwen2.5:3b
+
+Mixing is allowed; raw tags pass through unchanged.
 
 Usage:
-    # Smoke
+    # Smoke on the default tier
     python scripts/run_experiment.py --config configs/default.yaml --smoke
 
-    # Full run (single model)
+    # Full run on the medium tier
     python scripts/run_experiment.py --config configs/default.yaml \\
-        --n-per-bucket 100 --run-name full_qwen7b
+        --n-per-bucket 100 --models medium --run-name medium_full
+
+    # Full sweep across all three tiers
+    python scripts/run_experiment.py --config configs/default.yaml \\
+        --n-per-bucket 100 --models small medium large --run-name sweep
 
     # Resume an interrupted run (just rerun the same command)
-    python scripts/run_experiment.py --config configs/default.yaml \\
-        --n-per-bucket 100 --run-name full_qwen7b
 """
 
 from __future__ import annotations
@@ -112,7 +129,9 @@ def main() -> None:
     )
     p.add_argument(
         "--models", nargs="+", default=None,
-        help="override LLM models (default: [llm.model] from config)",
+        help="LLM models or tier names (small/medium/large) to run. "
+             "Tier names resolve via llm.models in the config. "
+             "Default: [llm.default_tier] from config.",
     )
     p.add_argument(
         "--smoke", action="store_true",
@@ -145,13 +164,23 @@ def main() -> None:
             "high_min": float(cfg["variance_thresholds"]["high_min"]),
         }
         T = float(cfg["calibration"]["temperature"])
-        llm_model_cfg = str(cfg["llm"]["model"])
+        llm_models_by_tier: dict[str, str] = dict(cfg["llm"]["models"])
+        llm_default_tier = str(cfg["llm"]["default_tier"])
         llm_host = str(cfg["llm"]["host"])
         llm_temp = float(cfg["llm"]["temperature"])
-        llm_timeout = float(cfg["llm"]["request_timeout_s"])
+        llm_num_ctx = int(cfg["llm"]["num_ctx"])
+        llm_seed = int(cfg["llm"]["seed"])
+        llm_timeout_s = float(cfg["llm"]["request_timeout_s"])
         max_turns = int(cfg["agent"]["max_turns"])
     except KeyError as e:
         sys.exit(f"missing required config key: {e}")
+
+    if llm_default_tier not in llm_models_by_tier:
+        sys.exit(
+            f"llm.default_tier={llm_default_tier!r} is not one of "
+            f"llm.models keys: {sorted(llm_models_by_tier)}"
+        )
+    llm_default_tag = llm_models_by_tier[llm_default_tier]
 
     # CLI args always override config; --smoke just changes the default fill-ins.
     if args.smoke:
@@ -164,7 +193,18 @@ def main() -> None:
         trials_per_image = (
             args.trials_per_image if args.trials_per_image is not None else trials_cfg
         )
-    models = args.models or [llm_model_cfg]
+
+    # Resolve --models against the tier table. Tier name → tag; raw tag passes through.
+    requested = args.models or [llm_default_tag]
+    models: list[str] = []
+    for m in requested:
+        if m in llm_models_by_tier:
+            models.append(llm_models_by_tier[m])
+        else:
+            models.append(m)
+    # Deduplicate while preserving order (if user passed both a tier and its tag).
+    seen: set[str] = set()
+    models = [m for m in models if not (m in seen or seen.add(m))]
 
     out_dir = runs_root / args.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -276,7 +316,9 @@ def main() -> None:
             model=m,
             base_url=llm_host,
             temperature=llm_temp,
-            timeout=llm_timeout,
+            num_ctx=llm_num_ctx,
+            seed=llm_seed,
+            client_kwargs={"timeout": llm_timeout_s},
         )
 
     # Run

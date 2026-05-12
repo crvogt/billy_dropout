@@ -76,12 +76,12 @@ python scripts/plot_results.py runs/<timestamp>/
 
 | File | Purpose |
 |---|---|
-| `configs/default.yaml` | canonical Orin Nano 8GB Super (paper results) |
-| `configs/agx_dev.yaml` | AGX Orin 64GB development override |
-| `configs/workstation.yaml` | x86 + RTX dev override |
+| `configs/default.yaml` | canonical config (paper results, all defaults) |
 
 Every path, model name, hyperparameter, and threshold lives in YAML. No
-hardcoding in code.
+hardcoding in code. Box-specific overrides should be expressed as CLI
+flags (`--models`, etc.) rather than partial YAML files — the script
+loaders do not deep-merge configs.
 
 ## Status
 

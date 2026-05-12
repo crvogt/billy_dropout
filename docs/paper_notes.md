@@ -48,7 +48,37 @@ phrasing:
 > competence rather than a binary ID/OOD flag. The OOD pilot point
 > extends this trend along the same monotone curve.
 
-**Locked numerical details for the methods description:**
+### III.B — LLM model selection
+
+We use the Gemma 4 family (Google DeepMind, Apache 2.0, released
+May 2026 on Ollama) across three size tiers: `gemma4:e4b` (small,
+~4B effective; edge variant), `gemma4:26b` (medium; mixture-of-experts
+with ~4B active params per token at 26B total), and `gemma4:31b`
+(large, dense). Selection criteria:
+
+  - **Open weights, native function-calling support** — required for
+    the LangGraph tool-bound agent path.
+  - **Multimodal capability** — kept available for future agent
+    variants that consume the image directly, though the present
+    experiment feeds only the detector's text-rendered posterior.
+  - **Western-origin** — motivated by venue requirements; one of the
+    paper's claims is a deployable system, and provenance matters
+    for that claim.
+  - **Coherent size spectrum within a single family** — critical for
+    the SWaP-scaling claim. Cross-family comparisons (e.g., Qwen vs
+    Llama vs Gemma) would confound architecture and training data with
+    model size; staying inside one family lets the size dimension be
+    the only varying factor in the sweep.
+
+Inference parameters held constant across tiers: `temperature=0.1`,
+`num_ctx=4096`, `seed=42`. Reproducibility under Ollama is approximate
+even at fixed seed (less consistent than vLLM); the three trials per
+event partially compensate. Pre-flight verification per tier via
+`scripts/verify_model.py` gates the full run on tool-call validity ≥
+90% on a 10-event baseline check.
+
+### III.C — Locked numerical details for the methods description
+
 - K = 20 stochastic forward passes
 - Six `nn.Dropout2d(p=0.25)` modules inserted in the classification
   branches (cv3) of YOLOv8's decoupled detection head at all three
@@ -165,6 +195,18 @@ evidence that this intrinsic signal tracks the same generalization
 gradient that defeats deterministic calibration here. The agent
 experiment in Section IV evaluates whether the LLM can act on this
 signal productively when categorical calibration breaks down.
+
+### V.B — Future work
+
+- **Cross-family generalization of the propagation mechanism.** The
+  experiment uses three tiers within the Gemma 4 family. Whether the
+  same variance-aware prompt structure produces the same behavioral
+  shift on a different open-weights family (e.g., Llama 3.2 Vision,
+  IBM Granite Vision, or successor Gemma releases) is the subject of
+  follow-on work. The mechanism — text-rendering of an MC Dropout
+  posterior into the prompt — does not depend on Gemma-specific
+  internals; the open question is whether comparably-sized models from
+  other families read the variance abstraction equally well.
 
 ## Open question (do not resolve in advance)
 

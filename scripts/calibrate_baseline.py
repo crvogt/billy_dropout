@@ -188,9 +188,8 @@ def main() -> None:
     except KeyError as e:
         sys.exit(
             f"missing required config key: {e} in {cfg_path}. "
-            "Override files (workstation.yaml, agx_dev.yaml) inherit from "
-            "configs/default.yaml — calibrate against default.yaml, or copy "
-            "the missing block into your override."
+            "Pass configs/default.yaml — the script loaders do not "
+            "deep-merge configs."
         )
 
     # Calibration is fit on the dedicated calibration split, separate from

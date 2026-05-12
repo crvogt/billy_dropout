@@ -1,5 +1,6 @@
-# Canonical config — Jetson Orin Nano 8GB Super (paper results platform).
-# Overrides: configs/agx_dev.yaml, configs/workstation.yaml.
+# Canonical config — single source of truth. Box-specific tweaks should
+# go through CLI flags rather than partial-yaml overrides; the script
+# loaders do not deep-merge.
 
 seed: 1337                         # numpy + torch + python-random seed
 
@@ -14,14 +15,30 @@ paths:
   runs_root: "runs"                # JSONL logs, atomic appends
 
 llm:
-  # Memory footprint reference (Q4_K_M quantization, Ollama):
-  #   qwen2.5vl:7b-instruct-q4_K_M    ~5.0 GB VRAM   ← Orin Nano 8GB default
-  #   llava:7b-q4_K_M                 ~4.5 GB VRAM
-  #   gemma3:4b-it-q4_K_M             ~3.0 GB VRAM   ← fallback if 7B OOMs
-  model: "qwen2.5vl:7b-instruct-q4_K_M"
+  # Model sweep — Gemma 4 family. Western-origin (Google DeepMind),
+  # Apache 2.0, multimodal, native agentic / function-calling support.
+  # Released May 2026 on Ollama. Sizes selected to span the SWaP
+  # deployment envelope from edge (Orin Nano 8GB) to workstation
+  # (AGX Orin / Thor).
+  models:
+    small:  "gemma4:e4b"           # ~4B effective (edge variant)
+    medium: "gemma4:26b"           # 26B (MoE; compute-light, larger memory)
+    large:  "gemma4:31b"           # 31B dense
+  default_tier: medium
+
+  # Inference parameters held constant across tiers
   host: "http://localhost:11434"
-  temperature: 0.0                 # Ollama does not fully respect this; see README
-  request_timeout_s: 120
+  temperature: 0.1                 # low but nonzero; Ollama's default is 0.8
+  num_ctx: 4096
+  seed: 42                         # captured for reproducibility; Ollama
+                                   # respects this less consistently than vLLM,
+                                   # so trial counts compensate
+  request_timeout_s: 600           # HTTP timeout (seconds) for a single
+                                   # ChatOllama.invoke. Cap on a hung
+                                   # inference (Ollama server stall, GPU
+                                   # lockup) so the run halts rather than
+                                   # blocking indefinitely. Generous for
+                                   # 31B-dense inference on Thor.
 
 perception:
   K: 20                            # MC Dropout stochastic forward passes
