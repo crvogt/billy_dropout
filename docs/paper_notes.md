@@ -8,7 +8,33 @@ when drafting the manuscript.
 
 ## Section III — Method
 
-**Detector-side calibration verification belongs here.** Panel D from
+### III.A — Pilot/full OOD separation
+
+Variance-interpretation thresholds were calibrated on the 26-image
+OOD pilot (Step B2, `data/ood_pilot/manifest.json`). Agent behavior
+is evaluated on a disjoint 100-image OOD test set
+(`data/ood_full/manifest.json`) drawn from the same source (Open
+Images V7 validation split) with pilot image IDs explicitly excluded
+via the downloader's `--exclude-manifest` flag. This pilot/full
+separation prevents calibration→evaluation leakage on the variance
+thresholds.
+
+Full-set bucket counts (post-attrition + post-dedup):
+
+| bucket | downloaded | precheck fires |
+|---|---|---|
+| distractors | 45 | 27 (60%) |
+| novel | 18 | 12 (66%) |
+| partial | 37 | 27 (73%) |
+| **combined** | **100** | **66 (66%)** |
+
+Cross-bucket image-ID deduplication is enforced via a
+`BUCKET_PRIORITY` ordering (novel-before-partial; both pull from
+the Door class).
+
+### Detector-side calibration verification
+
+Panel D from
 Step B (`runs/step_b/panel_d.png`) — the competence-vs-median-variance
 scatter showing the near-monotone relationship across Giraff-X / Gibson
 / DoorDetect plus the OOD pilot point — is verification that the MC

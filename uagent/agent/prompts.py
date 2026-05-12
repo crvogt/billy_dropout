@@ -12,6 +12,8 @@ based deferral.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from uagent.perception.posterior import Detection, GateDecision, Posterior
 
 # ---------------------------------------------------------------------------
@@ -55,21 +57,30 @@ variance signal in your `report` or `defer` message when relevant.
 """
 
 # ---------------------------------------------------------------------------
-# Per-turn detection block — the *only* substantive difference between
-# the two conditions.
+# Per-turn detection block — single source of truth.
+#
+# The *only* substantive difference between the two conditions is the
+# condition-specific tail (baseline = confidence-only; variance_aware =
+# mean_confidence + variance + interpretation). The header lines
+# (DETECTION:, label, bbox) are byte-identical between conditions by
+# construction — they come from the same _DETECTION_HEADER template,
+# formatted with the same field-format strings.
+#
+# Any future drift in formatting, whitespace, or field ordering between
+# conditions must happen here, in this one file. The two `render_*`
+# helpers below are thin wrappers and MUST NOT be changed to bypass
+# `build_perception_prompt`.
 # ---------------------------------------------------------------------------
 
-_BASELINE_DETECTION_TEMPLATE = """\
+_DETECTION_HEADER = """\
 DETECTION:
   label: {label}
   bbox: [{x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f}]
-  confidence: {confidence:.2f}
 """
 
-_VARIANCE_DETECTION_TEMPLATE = """\
-DETECTION:
-  label: {label}
-  bbox: [{x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f}]
+_BASELINE_TAIL = "  confidence: {confidence:.2f}\n"
+
+_VARIANCE_TAIL = """\
   mean_confidence: {mean_confidence:.2f}
   epistemic_variance: {epistemic_variance:.3f}
   interpretation: {interpretation}
@@ -78,28 +89,77 @@ DETECTION:
 _NO_DETECTION_BLOCK = "DETECTION:\n  (none — detector returned no objects)\n"
 
 
+def build_perception_prompt(
+    detection: Detection | Posterior | None,
+    condition: Literal["baseline", "variance_aware"],
+    gate: GateDecision | None = None,
+) -> str:
+    """Render a detection block for the agent's prompt context.
+
+    Single source of truth for the two experimental conditions' perception
+    strings. The header (DETECTION/label/bbox) is byte-identical between
+    conditions; only the tail differs.
+
+    Args:
+        detection: ``Detection`` for ``baseline``, ``Posterior`` for
+            ``variance_aware``. ``None`` yields the no-detection block.
+        condition: ``"baseline"`` or ``"variance_aware"``.
+        gate: required when ``condition == "variance_aware"`` and
+            ``detection`` is not None; ignored otherwise.
+    """
+    if detection is None:
+        return _NO_DETECTION_BLOCK
+
+    x1, y1, x2, y2 = detection.bbox
+    header = _DETECTION_HEADER.format(
+        label=detection.label, x1=x1, y1=y1, x2=x2, y2=y2
+    )
+
+    if condition == "baseline":
+        if not isinstance(detection, Detection):
+            raise TypeError(
+                f"baseline condition requires Detection; "
+                f"got {type(detection).__name__}"
+            )
+        return header + _BASELINE_TAIL.format(confidence=detection.confidence)
+
+    if condition == "variance_aware":
+        if not isinstance(detection, Posterior):
+            raise TypeError(
+                f"variance_aware condition requires Posterior; "
+                f"got {type(detection).__name__}"
+            )
+        if gate is None:
+            raise ValueError(
+                "variance_aware condition requires a GateDecision (gate=None)"
+            )
+        return header + _VARIANCE_TAIL.format(
+            mean_confidence=detection.mean_confidence,
+            epistemic_variance=detection.epistemic_variance,
+            interpretation=gate.interpretation,
+        )
+
+    raise ValueError(f"unknown condition: {condition!r}")
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat thin wrappers. MUST delegate to build_perception_prompt
+# so the source-of-truth invariant holds across the codebase.
+# ---------------------------------------------------------------------------
+
+
 def render_baseline_detection(det: Detection | None) -> str:
-    """Render a Detection for the baseline condition."""
-    if det is None:
-        return _NO_DETECTION_BLOCK
-    x1, y1, x2, y2 = det.bbox
-    return _BASELINE_DETECTION_TEMPLATE.format(
-        label=det.label, x1=x1, y1=y1, x2=x2, y2=y2, confidence=det.confidence
-    )
+    """Render a Detection for the baseline condition (delegates to build_perception_prompt)."""
+    return build_perception_prompt(det, "baseline")
 
 
-def render_variance_detection(post: Posterior | None, gate: GateDecision | None) -> str:
-    """Render a Posterior + its GateDecision for the variance_aware condition."""
-    if post is None or gate is None:
-        return _NO_DETECTION_BLOCK
-    x1, y1, x2, y2 = post.bbox
-    return _VARIANCE_DETECTION_TEMPLATE.format(
-        label=post.label,
-        x1=x1, y1=y1, x2=x2, y2=y2,
-        mean_confidence=post.mean_confidence,
-        epistemic_variance=post.epistemic_variance,
-        interpretation=gate.interpretation,
-    )
+def render_variance_detection(
+    post: Posterior | None, gate: GateDecision | None
+) -> str:
+    """Render a Posterior + GateDecision for variance_aware (delegates to build_perception_prompt)."""
+    if post is None:
+        return build_perception_prompt(None, "variance_aware")
+    return build_perception_prompt(post, "variance_aware", gate=gate)
 
 
 def system_prompt(condition: str) -> str:
