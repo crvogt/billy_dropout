@@ -21,7 +21,8 @@ from uagent.perception.posterior import Detection, GateDecision, Posterior
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT_BASE = """\
-You control a wheeled mobile robot. You receive perception results from a
+You control a wheeled mobile robot. Your task: navigate toward a
+doorway when one is visible. You receive perception results from a
 camera-based detector and decide what action to take next.
 
 Available actions (call exactly one per turn):
@@ -31,12 +32,28 @@ Available actions (call exactly one per turn):
   - report(message: str)              speak verbally; no robot motion
   - defer(reason: str)                explicit HOLD; end the turn
 
-Rules:
-  - Output exactly one tool call. No additional natural language unless
-    you choose `report`.
-  - If the detection is missing or empty, treat it as "no target visible".
-  - Never act on a detection you do not trust. Prefer `defer` or
-    `look_around` over committing to motion under doubt.
+When to choose each action — these are distinct cases:
+
+  - move_forward / rotate: on detections you have reason to trust —
+    adequate confidence. Commit to the motion; repeated re-sensing
+    on a clear detection wastes time.
+
+  - look_around: when a detection is plausible but you want more
+    information before committing — partial occlusion, a detection
+    at the edge of the frame, or a single mid-confidence fire you
+    want to re-sense before acting.
+
+  - defer: when the detection's confidence is very low (below ~0.4)
+    and you have no other information to act on. End the turn rather
+    than commit motion on unreliable data.
+
+  - report: a verbal observation; no robot motion. Use sparingly.
+
+Output exactly one tool call. No additional natural language unless
+you choose `report`. Decisiveness on trustworthy detections is part of
+the job; caution is for genuinely ambiguous inputs, not the default.
+If the detection is missing or empty (no doorway in view), call
+`look_around` to search.
 """
 
 # ---------------------------------------------------------------------------
