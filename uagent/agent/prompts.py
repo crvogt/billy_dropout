@@ -19,16 +19,27 @@ from uagent.perception.posterior import Detection, GateDecision, Posterior
 # ---------------------------------------------------------------------------
 # Shared prefix — identical across conditions.
 #
-# `<|think|>` is Gemma 4's literal control token to enable structured
-# thinking mode. It MUST be the very first content of the system message,
-# before any other character. With it present, the model emits responses
-# of the form `<|channel>thought\n...\n<channel|>\n<final answer or tool>`;
-# we parse the thought block out in harness.parse_thought_channel.
+# Two thinking-mode signals are present:
 #
-# Per the Google docs, larger Gemma 4 models can behave unstably without
-# this token even when thinking is otherwise disabled, so we apply it
-# uniformly across both experimental conditions (the only meaningful
-# inter-condition difference remains the variance-aware addendum below).
+#   1. The literal `<|think|>` control token at the very start of the
+#      system message. Per the Gemma 4 spec, this enables structured
+#      thinking via the `<|channel>thought ... <channel|>` envelope on
+#      compliant inference paths. Kept as a forward-compatibility hedge.
+#
+#   2. An explicit verbal directive to emit a literal `<think>...</think>`
+#      block on every turn. The sandbox in `uagent/sandbox/gemma4_thinking/`
+#      established that `<|think|>` alone is NOT respected by the e2b/e4b
+#      Gemma 4 variants over Ollama's HTTP surface, while the verbal
+#      `<think>` instruction is. Both surface forms are recognized by
+#      `uagent.agent.parsing.parse_thought_channel` (strict envelope first,
+#      then literal `<think>` as a fallback).
+#
+# The directive must remain in the BASE prompt — both conditions need
+# reasoning chains for the experiment's reasoning-coverage success
+# criterion. Variance-specific language stays out of the base entirely;
+# only the addendum below introduces variance / epistemic / gate
+# vocabulary, preserving baseline's variance-blindness.
+#
 # Refs: https://ollama.com/library/gemma4
 #       https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
 # ---------------------------------------------------------------------------
@@ -38,6 +49,15 @@ SYSTEM_PROMPT_BASE = """\
 You control a wheeled mobile robot. Your task: navigate toward a
 doorway when one is visible. You receive perception results from a
 camera-based detector and decide what action to take next.
+
+Reasoning is required. Before any tool call OR final reply, emit a
+literal `<think>...</think>` block (these exact characters, with the
+opening and closing tags) containing one to three sentences of your
+reasoning. The block is mandatory on every turn, including turns
+where the decision seems obvious; do not omit it even on a confident
+commit. Omitting it produces a malformed event that fails the
+experiment's reasoning-coverage check. After the closing </think>
+tag, emit exactly one tool call (or, for `report`, the final message).
 
 Available actions (call exactly one per turn):
   - move_forward(distance_m: float)   move forward by distance_m meters
@@ -52,22 +72,29 @@ When to choose each action — these are distinct cases:
     adequate confidence. Commit to the motion; repeated re-sensing
     on a clear detection wastes time.
 
-  - look_around: when a detection is plausible but you want more
-    information before committing — partial occlusion, a detection
-    at the edge of the frame, or a single mid-confidence fire you
-    want to re-sense before acting.
+  - look_around: when a different viewing angle would disambiguate
+    the detection — partial occlusion, a detection at the edge of
+    the frame, or a single mid-confidence fire whose framing suggests
+    a wider view could disambiguate. `look_around` is NOT a default
+    delay action; only call it when a new viewpoint is the specific
+    fix. The `look_around` tool performs a panoramic visual scan from
+    the current position. Do not chain `rotate` calls to manually
+    search for a different angle when `look_around` is the dedicated
+    tool for that purpose.
 
-  - defer: when the detection's confidence is very low (below ~0.4)
-    and you have no other information to act on. End the turn rather
-    than commit motion on unreliable data.
+  - defer: when confidence is very low (below ~0.4) and no
+    additional viewing angle would help disambiguate the scene. End
+    the turn rather than commit motion on unreliable data. When both
+    `look_around` and `defer` could apply, prefer `defer`;
+    `look_around` is for mid-confidence ambiguity.
 
   - report: a verbal observation; no robot motion. Use sparingly.
 
-Output exactly one tool call. No additional natural language unless
-you choose `report`. Decisiveness on trustworthy detections is part of
-the job; caution is for genuinely ambiguous inputs, not the default.
-If the detection is missing or empty (no doorway in view), call
-`look_around` to search.
+Output exactly one tool call. Outside the `<think>` block, emit no
+additional natural language unless you choose `report`. Decisiveness
+on trustworthy detections is part of the job; caution is for
+genuinely ambiguous inputs, not the default. If the detection is
+missing or empty (no doorway in view), call `look_around` to search.
 """
 
 # ---------------------------------------------------------------------------
@@ -82,9 +109,16 @@ The variance is computed from K=20 stochastic forward passes of the
 detector; HIGH variance means the detector's passes disagreed with each
 other about whether the object is there. Treat HIGH-variance detections
 as uncertain even when mean_confidence looks adequate. For motion actions
-in particular, prefer `defer` or `look_around` over `move_forward` /
-`rotate` when variance is HIGH. Verbalize your reasoning about the
-variance signal in your `report` or `defer` message when relevant.
+in particular, prefer `defer` (or `look_around` if a new viewpoint would
+specifically help) over `move_forward` / `rotate` when variance is HIGH.
+Verbalize your reasoning about the variance signal in your `report` or
+`defer` message when relevant.
+
+When the gate level is LOW AND `mean_confidence` is adequate, the
+detector's confidence is well-calibrated and you should commit to the
+appropriate motion action. LOW gate does not override the low-confidence
+defer rule. If `mean_confidence` is very low (below ~0.4), defer — even
+when variance is LOW. Caution is reserved for MEDIUM and HIGH gate levels.
 """
 
 # ---------------------------------------------------------------------------

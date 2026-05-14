@@ -208,6 +208,72 @@ signal productively when categorical calibration breaks down.
   internals; the open question is whether comparably-sized models from
   other families read the variance abstraction equally well.
 
+## Pre-specified success criteria — final prompt overnight runs (recorded 2026-05-13)
+
+Recorded **before** the runs complete to lock the criteria against
+post-hoc rationalization. The final-prompt overnight runs cover two
+tiers (`gemma4:e4b` and `gemma4:26b`); 31B is deferred and out of
+scope for this gate.
+
+The runs are evaluated against four pre-specified criteria. All four
+must hold on **both** tiers for the experiment to count as a positive
+result. If any criterion fails on either tier, the failure is reported
+and analyzed before any iteration; we do not iterate criteria after
+seeing the data.
+
+  1. **Reasoning chain coverage.** `agent_reasoning_chain` non-empty on
+     ≥ 80% of events, both tiers, both conditions. This is the prompt-
+     compliance gate — the prior 26B run scored 0% on this axis and
+     drove the prompt redesign. Below 80% means the model is still
+     ignoring the reasoning directive and the audit trail the paper
+     relies on is incomplete.
+
+  2. **ID-positives motion rate under variance_aware ≥ 85%, both
+     tiers.** "Motion" = `move_forward` ∪ `rotate`. The
+     `in_distribution_pos` bucket should produce confident commit
+     behavior — if the variance_aware addendum over-suppresses motion
+     on the easy cases, the agent isn't usable. This is the
+     decisive-action-license check.
+
+  3. **OOD-novel motion rate under variance_aware ≤ 15%, both tiers.**
+     The `ood_novel` bucket should produce suppression — defer / look_
+     around dominate, motion is rare. This is the variance-aware
+     condition's main contribution: the variance signal moving the
+     agent off of motion on inputs the detector cannot reliably
+     classify.
+
+  4. **Within OOD variance_aware: gate-conditional motion split.**
+     LOW gate events: motion rate > 70%. HIGH gate events: motion
+     rate < 30%. This is the within-OOD differential — the
+     experimental claim is not just that OOD motion is suppressed in
+     aggregate, but that the suppression is *signal-driven*. LOW gate
+     events inside OOD should still commit; HIGH gate events should
+     not. A flat distribution here means the LLM is reading the
+     bucket, not the gate.
+
+Failure modes and their interpretations:
+
+  - Criterion 1 fails → prompt-compliance problem; the rest of the
+    metrics are not interpretable until reasoning is being emitted.
+    Halt; do not analyze 2-4.
+  - Criterion 2 fails (motion too LOW on ID positives) → the LOW-gate
+    decisive-action license isn't reaching the model, OR the
+    look_around / defer disambiguation is over-rotating the model
+    toward caution. Diff against the prior 26B run.
+  - Criterion 3 fails (motion too HIGH on OOD novel) → the variance
+    addendum isn't moving behavior; either the gate signal isn't being
+    read or the addendum's caution language is too weak.
+  - Criterion 4 fails (no gate-conditional split inside OOD) → H2 from
+    the open-question section below: the LLM treats small raw variance
+    values as "essentially zero" regardless of categorical label.
+    Aggressive-dropout follow-up becomes in-scope.
+
+The 31B tier is **not** launched on the basis of overnight results
+alone, regardless of how the four criteria score. 31B requires
+explicit user approval after analysis. Wall-clock budget for 31B
+(~4-5× the 26B latency from prior viability) is not justified without
+the user explicitly authorizing the spend.
+
 ## Open question (do not resolve in advance)
 
 The Step B variance scale (median 0.0026 for ID confident-correct,

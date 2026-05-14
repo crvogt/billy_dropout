@@ -265,3 +265,63 @@ def test_strip_empty_or_non_string_returns_empty():
 def test_strip_only_thought_yields_empty():
     """If the entire content is a thought block, stripping leaves nothing."""
     assert strip_thought_channel("<|channel>thought\nonly\n<channel|>") == ""
+
+
+# ---------------------------------------------------------------------------
+# Loose `<think>...</think>` fallback — covers the empirically-observed
+# response shape on gemma4 e2b/e4b under the verbal-instruction prompt.
+# Strict envelope wins when both are present (forward-compat hedge).
+# ---------------------------------------------------------------------------
+
+
+def test_loose_think_tag_is_picked_up():
+    """`<think>...</think>` extracted via the fallback path."""
+    content = (
+        "<think>Confidence is high; commit forward.</think>\n"
+        "Calling move_forward(0.3)."
+    )
+    assert parse_thought_channel(content) == "Confidence is high; commit forward."
+
+
+def test_loose_think_tag_case_insensitive():
+    """Case variations on the literal tag still match."""
+    assert parse_thought_channel("<Think>hello</Think>") == "hello"
+    assert parse_thought_channel("<THINK>hello</THINK>") == "hello"
+
+
+def test_loose_empty_think_tag_yields_empty():
+    assert parse_thought_channel("<think></think>tail") == ""
+
+
+def test_loose_multiline_think_block():
+    content = "<think>\nline one\nline two\n</think>\nfinal"
+    assert parse_thought_channel(content) == "line one\nline two"
+
+
+def test_strict_pattern_wins_when_both_present():
+    """If a response somehow contains both surface forms, the strict
+    envelope is the source of truth (per the spec'd shape)."""
+    content = (
+        "<|channel>thought\nstrict\n<channel|>\n"
+        "<think>loose</think>\nfinal"
+    )
+    assert parse_thought_channel(content) == "strict"
+
+
+def test_loose_unclosed_think_yields_empty():
+    """Loose pattern also requires a closer."""
+    assert parse_thought_channel("<think>never closed") == ""
+
+
+def test_strip_removes_loose_think_block():
+    content = "<think>hidden</think>\nVisible answer."
+    assert strip_thought_channel(content) == "Visible answer."
+
+
+def test_strip_removes_both_surfaces():
+    """Strict + loose blocks both stripped from the same content."""
+    content = (
+        "<|channel>thought\nA\n<channel|> mid "
+        "<think>B</think> tail"
+    )
+    assert strip_thought_channel(content) == "mid  tail"
