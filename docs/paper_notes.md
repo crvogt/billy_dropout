@@ -119,6 +119,77 @@ event partially compensate. Pre-flight verification per tier via
   filter in the OOD construction subsection — necessary for
   reproducibility.
 
+### III.D — Why the variance_aware prompt is explicit
+
+The variance_aware condition uses an explicit mechanical mapping from
+the calibrated interpretation label to a tool call (LOW →
+`move_forward(distance_m=0.5)`; MEDIUM → `look_around()`; HIGH →
+`defer(reason=...)`; empty detection → `look_around()`). The
+prompt instructs the LLM to follow the mapping deterministically and
+not to construct parallel thresholds from `mean_confidence`. The
+baseline condition has no such mapping; it gets a narrative system
+prompt with only the confidence scalar and chooses actions
+unconditionally.
+
+The explicit mapping is a deliberate design choice driven by a single
+pilot prompt run on the 4B tier (final-prompt-v1, narrative variance
+addendum with `<think>` reasoning required):
+
+  - Reasoning chains non-empty on 100% of events.
+  - LOW-gate ID-positive events emitted `move_forward` on only 48%
+    of trials (target: >90%).
+  - HIGH-gate OOD events emitted `defer` on 0% of trials.
+  - Reasoning chains showed the model inventing its own thresholds
+    from `mean_confidence` (e.g., "0.42 is below my threshold of
+    0.5 so I will defer") rather than using the calibrated
+    interpretation label.
+
+Run path: `runs/medium_4b_final_<timestamp>/events.jsonl` for the
+final-prompt-v1 pilot. **TODO before Step G:** resolve `<timestamp>`
+to the actual run directory and re-verify the four numbers above
+directly from the events file.
+
+The interpretation: small LLMs (4B-class) do not reliably reason
+about variance unprompted even when the variance signal is rendered
+in the perception block; the categorical LOW/MEDIUM/HIGH label was
+designed to make variance legible but the LLM disregarded it and
+reverted to confidence-thresholding. The redesign replaces "reason
+about variance" with "execute a calibrated mapping."
+
+Counter-position. A plausible reading is that the variance_aware
+condition has been reduced to a Python `if/elif` and there is no
+LLM role left. The LLM's actual role under the v2 prompt is to parse
+the heterogeneous perception block (which may or may not contain a
+detection, with varying bbox shapes and confidence scalars), branch
+on the categorical label, and emit a schema-valid tool call with
+auditable per-event provenance — tasks an `if/elif` cannot perform
+on free-form prompt input. The contribution is operational, not
+cognitive: an LLM with a calibrated mapping and a variance signal
+yields the behavioral suppression the paper's thesis requires, even
+at small scales where unconstrained variance reasoning fails.
+
+The methodological contrast:
+
+  - Baseline evaluates the LLM's action selection under a
+    confidence-only perception block, with the LLM exercising full
+    discretion.
+  - Variance-aware evaluates whether a constrained LLM — instructed
+    to defer to a calibrated mapping rather than reason from scalars
+    — produces behaviorally appropriate motion suppression under OOD.
+
+The reasoning chain in the v2 prompt is a compliance trace rather
+than a reasoning artifact. It provides interpretable per-event
+provenance (which interpretation level the model observed, which
+action it selected) and a compliance signal: chains that reference
+the interpretation label and the mapped action confirm the mapping
+is being followed; chains that invent parallel thresholds signal
+mapping deviation.
+
+The decision tree (LOW/MEDIUM/HIGH → action) is hand-calibrated by
+the Step B variance-distribution analysis (`runs/step_b/summary.json`)
+using the variance thresholds locked in III.C above; it is NOT a
+learned policy over the LLM's outputs.
+
 ## Section IV — Results
 
 **Panel C from Step B (`runs/step_b/panel_c.png`) is the gate-check

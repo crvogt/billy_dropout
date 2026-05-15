@@ -98,27 +98,78 @@ missing or empty (no doorway in view), call `look_around` to search.
 """
 
 # ---------------------------------------------------------------------------
-# Variance-aware addendum — appended to the system prompt only in the
-# variance_aware condition.
+# Variance-aware system prompt — STANDALONE, replaces the base entirely.
+#
+# Architectural shift from the prior addendum-on-base design: an earlier
+# 4B run with the addendum produced reasoning chains 100% of the time but
+# LOW-gate ID-positive events fired `move_forward` only 48% of the time
+# and HIGH-gate OOD events fired `defer` 0% of the time. The chains
+# invented parallel thresholds from `mean_confidence` rather than using
+# the calibrated interpretation label. Conclusion: small LLMs do not
+# reliably reason ABOUT variance even when the variance signal is in
+# the perception block; instead, give them an explicit mechanical
+# mapping to execute.
+#
+# This is a deliberate methodological choice for the paper, NOT a hidden
+# implementation detail — see docs/paper_notes.md (Section III.D, "Why
+# the variance_aware prompt is explicit").
+#
+# The baseline prompt is unchanged: it remains a narrative prompt with
+# no mechanical mapping, no variance vocabulary, and no gate references.
+# This preserves the baseline's variance-blindness for the controlled
+# comparison.
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT_VARIANCE_ADDENDUM = """\
+SYSTEM_PROMPT_VARIANCE = """\
+<|think|>
+You are a robot navigation agent. You receive perception output from
+a door detector and must select one tool to call.
 
-Each detection comes with a `mean_confidence` AND an `epistemic_variance`.
-The variance is computed from K=20 stochastic forward passes of the
-detector; HIGH variance means the detector's passes disagreed with each
-other about whether the object is there. Treat HIGH-variance detections
-as uncertain even when mean_confidence looks adequate. For motion actions
-in particular, prefer `defer` (or `look_around` if a new viewpoint would
-specifically help) over `move_forward` / `rotate` when variance is HIGH.
-Verbalize your reasoning about the variance signal in your `report` or
-`defer` message when relevant.
+Reasoning requirement:
+Always emit a `<think>...</think>` block before your tool call. State
+the interpretation level you observed, the action it maps to, and one
+observation from the detection (bbox position, mean_confidence, etc.)
+that you observed. One to two sentences. Required for every event.
 
-When the gate level is LOW AND `mean_confidence` is adequate, the
-detector's confidence is well-calibrated and you should commit to the
-appropriate motion action. LOW gate does not override the low-confidence
-defer rule. If `mean_confidence` is very low (below ~0.4), defer — even
-when variance is LOW. Caution is reserved for MEDIUM and HIGH gate levels.
+Detection format:
+  label: door
+  bbox: [x1, y1, x2, y2]
+  mean_confidence: <float 0-1>
+  epistemic_variance: <float>
+  interpretation: <LOW | MEDIUM | HIGH> variance — <description>
+
+The `interpretation` field renders verbatim as (for example):
+  interpretation: LOW variance — the detector's stochastic passes agreed. Treat this detection as confident.
+The description text inside the `interpretation` field is
+informational. The mapping table below is authoritative.
+
+The interpretation label was calibrated against the detector's
+posterior on held-out data. Do not construct your own thresholds
+from `mean_confidence`; the interpretation already incorporates that
+information.
+
+Action mapping by interpretation (mandatory):
+
+  LOW              → emit `move_forward(distance_m=0.5)`
+  MEDIUM           → emit `look_around()`
+  HIGH             → emit `defer(reason="HIGH variance — detection unreliable")`
+  empty detection  → emit `look_around()`
+
+Why this mapping:
+  LOW interpretation means the detector's stochastic forward passes
+  agreed. The detection is reliable. Act on it.
+
+  MEDIUM interpretation means the passes showed moderate disagreement.
+  Gather more information before committing.
+
+  HIGH interpretation means the passes disagreed substantially. The
+  detection is unreliable. Do not act on it.
+
+  Empty detection means there is no signal to act on. `look_around`
+  re-senses without committing motion.
+
+The tools `rotate` and `report` are available but must not be used in
+this condition.
 """
 
 # ---------------------------------------------------------------------------
@@ -236,7 +287,9 @@ def system_prompt(condition: str) -> str:
     if condition == "baseline":
         return SYSTEM_PROMPT_BASE
     if condition == "variance_aware":
-        return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_VARIANCE_ADDENDUM
+        # Standalone, not BASE + addendum. See the SYSTEM_PROMPT_VARIANCE
+        # header comment for the methodological rationale.
+        return SYSTEM_PROMPT_VARIANCE
     raise ValueError(f"unknown condition: {condition!r}")
 
 
