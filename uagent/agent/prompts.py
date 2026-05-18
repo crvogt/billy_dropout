@@ -16,6 +16,13 @@ from typing import Literal
 
 from uagent.perception.posterior import Detection, GateDecision, Posterior
 
+# Conditions that share the variance-aware perception block. Centralized
+# so the runtime branch in `query_perception`, the dispatch helpers in
+# this file, and the perceiver-keying loop in `scripts/run_experiment.py`
+# cannot drift on which conditions feed the MC Dropout pipeline.
+VARIANCE_CONDITIONS: tuple[str, ...] = ("variance_aware", "variance_aware_free")
+ALL_CONDITIONS: tuple[str, ...] = ("baseline",) + VARIANCE_CONDITIONS
+
 # ---------------------------------------------------------------------------
 # Shared prefix — identical across conditions.
 #
@@ -173,6 +180,71 @@ this condition.
 """
 
 # ---------------------------------------------------------------------------
+# Variance-aware FREE prompt — mission-framed, no prescribed mapping.
+#
+# Companion to SYSTEM_PROMPT_VARIANCE (directive). The pair tests two
+# propagation styles for uncertainty into a small LLM agent:
+#   - directive: a calibrated mechanical mapping the LLM executes;
+#   - free:      the same posterior surfaces, but the LLM exercises
+#                discretion under mission framing.
+#
+# The directive condition was designed in response to a 4B pilot where
+# narrative variance prompting failed to produce gate-conditional motion
+# (see III.D of paper_notes.md). The free condition exists to defuse the
+# methodological objection that the directive reduces the LLM to a
+# switch statement. If free produces signal-driven behavior comparable
+# to directive, that is the paper's strongest result; if it does not,
+# the directive vs free contrast itself is the contribution.
+#
+# Implementation note: the per-turn DETECTION block for this condition
+# is byte-identical to the directive condition's (mean_confidence +
+# epistemic_variance + interpretation label). Only this system prompt
+# differs. The interpretation label is rendered for the LLM but no
+# mapping is supplied; the LLM is told explicitly that no mapping is
+# prescribed.
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT_VARIANCE_FREE = """\
+<|think|>
+You are an autonomous ground vehicle. Your mission is to find a
+doorway, approach it, and pass through.
+
+For each perception cycle, you receive output from an onboard door
+detector and must choose one action.
+
+The detector reports three values about each detection:
+- mean_confidence: the detector's average confidence across K=20
+  stochastic forward passes
+- epistemic_variance: the variance of those confidence estimates
+  across passes — a measure of how much the passes disagreed
+- interpretation: a coarse summary (LOW, MEDIUM, or HIGH variance)
+  computed by thresholds on epistemic_variance
+
+These describe how the detector behaved on this particular image.
+How you use these signals to choose an action is your decision.
+There is no prescribed mapping from variance level to action.
+
+Available actions:
+- move_forward(distance_m): commit to forward motion
+- rotate(angle_deg): turn in place
+- look_around(): request a panoramic re-perception
+- defer(reason): explicit hold; end the cycle without acting
+- report(message): verbal observation. Use only when explicitly
+  asked to make a verbal observation, not as a stalling action.
+
+Choose the action that best serves the mission. Consider that
+committing to motion on a wrong detection is harder to recover
+from than re-sensing; that re-sensing or deferring slows mission
+progress; and that the detector's reliability varies across images.
+The balance is yours to strike.
+
+Always emit a <think>...</think> block before your tool call. State
+your reasoning about the perception, your interpretation of the
+detector signals, and why this action is the right choice given the
+mission. Required for every event.
+"""
+
+# ---------------------------------------------------------------------------
 # Per-turn detection block — single source of truth.
 #
 # The *only* substantive difference between the two conditions is the
@@ -207,20 +279,27 @@ _NO_DETECTION_BLOCK = "DETECTION:\n  (none — detector returned no objects)\n"
 
 def build_perception_prompt(
     detection: Detection | Posterior | None,
-    condition: Literal["baseline", "variance_aware"],
+    condition: Literal["baseline", "variance_aware", "variance_aware_free"],
     gate: GateDecision | None = None,
 ) -> str:
     """Render a detection block for the agent's prompt context.
 
-    Single source of truth for the two experimental conditions' perception
+    Single source of truth for the experimental conditions' perception
     strings. The header (DETECTION/label/bbox) is byte-identical between
     conditions; only the tail differs.
 
+    ``variance_aware`` and ``variance_aware_free`` produce byte-identical
+    output — the conditions differ only in the system prompt (directive
+    mapping vs free-form discretion under mission framing). Both require
+    a ``Posterior`` and a ``GateDecision``.
+
     Args:
         detection: ``Detection`` for ``baseline``, ``Posterior`` for
-            ``variance_aware``. ``None`` yields the no-detection block.
-        condition: ``"baseline"`` or ``"variance_aware"``.
-        gate: required when ``condition == "variance_aware"`` and
+            ``variance_aware`` / ``variance_aware_free``. ``None`` yields
+            the no-detection block.
+        condition: ``"baseline"``, ``"variance_aware"``, or
+            ``"variance_aware_free"``.
+        gate: required when ``condition`` is a variance-aware variant and
             ``detection`` is not None; ignored otherwise.
     """
     if detection is None:
@@ -239,15 +318,15 @@ def build_perception_prompt(
             )
         return header + _BASELINE_TAIL.format(confidence=detection.confidence)
 
-    if condition == "variance_aware":
+    if condition in VARIANCE_CONDITIONS:
         if not isinstance(detection, Posterior):
             raise TypeError(
-                f"variance_aware condition requires Posterior; "
+                f"{condition} condition requires Posterior; "
                 f"got {type(detection).__name__}"
             )
         if gate is None:
             raise ValueError(
-                "variance_aware condition requires a GateDecision (gate=None)"
+                f"{condition} condition requires a GateDecision (gate=None)"
             )
         return header + _VARIANCE_TAIL.format(
             mean_confidence=detection.mean_confidence,
@@ -270,19 +349,27 @@ def render_baseline_detection(det: Detection | None) -> str:
 
 
 def render_variance_detection(
-    post: Posterior | None, gate: GateDecision | None
+    post: Posterior | None,
+    gate: GateDecision | None,
+    condition: Literal["variance_aware", "variance_aware_free"] = "variance_aware",
 ) -> str:
-    """Render a Posterior + GateDecision for variance_aware (delegates to build_perception_prompt)."""
+    """Render a Posterior + GateDecision for a variance-aware condition.
+
+    Both ``variance_aware`` and ``variance_aware_free`` produce identical
+    detection-block output (see ``build_perception_prompt``). The
+    ``condition`` parameter is accepted for clarity at call sites and
+    routed through unchanged.
+    """
     if post is None:
-        return build_perception_prompt(None, "variance_aware")
-    return build_perception_prompt(post, "variance_aware", gate=gate)
+        return build_perception_prompt(None, condition)
+    return build_perception_prompt(post, condition, gate=gate)
 
 
 def system_prompt(condition: str) -> str:
     """Return the system prompt for the given condition.
 
     Args:
-        condition: "baseline" or "variance_aware".
+        condition: "baseline", "variance_aware", or "variance_aware_free".
     """
     if condition == "baseline":
         return SYSTEM_PROMPT_BASE
@@ -290,6 +377,8 @@ def system_prompt(condition: str) -> str:
         # Standalone, not BASE + addendum. See the SYSTEM_PROMPT_VARIANCE
         # header comment for the methodological rationale.
         return SYSTEM_PROMPT_VARIANCE
+    if condition == "variance_aware_free":
+        return SYSTEM_PROMPT_VARIANCE_FREE
     raise ValueError(f"unknown condition: {condition!r}")
 
 

@@ -11,9 +11,12 @@ LLM layer; `dispatch` executes whichever tool the LLM emitted, captures
 the result, and either terminates the turn (report / defer) or feeds
 back into `agent_reason` for another turn (capped by max_turns).
 
-The DAG is condition-agnostic; the only thing that varies between
-`baseline` and `variance_aware` is the prompt rendering inside
-`query_perception` and the system prompt assembled in `agent_reason`.
+The DAG is condition-agnostic across all three conditions
+(`baseline`, `variance_aware`, `variance_aware_free`); the only thing
+that varies is the prompt rendering inside `query_perception` and the
+system prompt assembled in `agent_reason`. The two variance-aware
+conditions render an identical perception block — only the system
+prompt differs.
 
 `build_runtime` accepts the LLM and perceiver as injected dependencies.
 For tests, callers pass a MockLLM and a MockPerceiver. For the live
@@ -30,6 +33,8 @@ from langgraph.graph import END, StateGraph
 
 from uagent.agent.parsing import parse_thought_channel, strip_thought_channel
 from uagent.agent.prompts import (
+    ALL_CONDITIONS,
+    VARIANCE_CONDITIONS,
     gate_from_variance,
     render_baseline_detection,
     render_variance_detection,
@@ -42,7 +47,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 
-Condition = Literal["baseline", "variance_aware"]
+Condition = Literal["baseline", "variance_aware", "variance_aware_free"]
 
 
 class _Perceiver(Protocol):
@@ -95,7 +100,7 @@ def build_runtime(
     """Compile a LangGraph runtime for one condition.
 
     Args:
-        condition: "baseline" or "variance_aware".
+        condition: "baseline", "variance_aware", or "variance_aware_free".
         perceiver: object with .predict(image) returning list[Detection]
             (baseline) or list[Posterior] (variance_aware).
         llm: object with .bind_tools(tools) → llm and .invoke(messages)
@@ -105,7 +110,7 @@ def build_runtime(
         live_tools: if True, tool wrappers route through ROS; else mock.
     """
 
-    if condition not in ("baseline", "variance_aware"):
+    if condition not in ALL_CONDITIONS:
         raise ValueError(f"unknown condition: {condition!r}")
 
     sys_text = system_prompt(condition)
@@ -132,13 +137,17 @@ def build_runtime(
         image = state["image"]
         results = perceiver.predict(image)
 
-        if condition == "variance_aware":
+        if condition in VARIANCE_CONDITIONS:
+            # Detection block is byte-identical between the two variance-
+            # aware conditions; only the system prompt differs.
             top: Posterior | None = max(
                 results, key=lambda p: p.mean_confidence, default=None
             ) if results else None
             if top is None:
                 return {
-                    "perception_block": render_variance_detection(None, None),
+                    "perception_block": render_variance_detection(
+                        None, None, condition=condition
+                    ),
                     "posterior_meta": {},
                 }
             gate = gate_from_variance(
@@ -146,7 +155,9 @@ def build_runtime(
                 posterior_label=top.label,
             )
             return {
-                "perception_block": render_variance_detection(top, gate),
+                "perception_block": render_variance_detection(
+                    top, gate, condition=condition
+                ),
                 "posterior_meta": {
                     "label": top.label,
                     "bbox": list(top.bbox),

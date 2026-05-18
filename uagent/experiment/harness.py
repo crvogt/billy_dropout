@@ -10,7 +10,7 @@ JSONL event schema (fixed):
       "trial_index":           int,        # for resume key
       "image_path":            str,        # repo-relative
       "bucket":                str,        # in_distribution_pos | ood_*
-      "condition":             str,        # baseline | variance_aware
+      "condition":             str,        # baseline | variance_aware | variance_aware_free
       "posterior":             dict,       # condition-specific keys
       "agent_action":          str,        # final tool name
       "agent_args":            dict,

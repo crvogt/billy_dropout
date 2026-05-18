@@ -116,22 +116,49 @@ def latency_summary(events: list[dict]) -> dict[str, dict[str, float]]:
     return out
 
 
-def differential_abstention(events: list[dict]) -> dict[str, float]:
-    """{bucket -> P(defer|variance_aware) - P(defer|baseline)} aggregated over models."""
+def differential_abstention(
+    events: list[dict],
+) -> dict[str, dict[str, float]]:
+    """Per-bucket P(defer|condition) deltas relative to baseline.
+
+    Returns ``{bucket -> {condition -> P(defer|condition) - P(defer|baseline)}}``
+    aggregated over models. One entry per non-baseline condition observed
+    anywhere in ``events`` — the inner-dict key set is the global non-
+    baseline condition set, NOT only the conditions seen in that bucket.
+    This keeps the report shape stable across buckets so downstream tables
+    have consistent columns.
+
+    NaN rules:
+      - Buckets with no baseline events emit NaN for every non-baseline
+        condition.
+      - Conditions absent from a given bucket (but present in another)
+        emit NaN for that bucket.
+
+    With three conditions this exposes both ``variance_aware − baseline``
+    and ``variance_aware_free − baseline`` so neither is silently dropped
+    from downstream reports.
+    """
     by_bucket_cond: dict[tuple[str, str], list[bool]] = defaultdict(list)
     for e in events:
         b = e.get("bucket", "")
         c = e.get("condition", "")
         by_bucket_cond[(b, c)].append(e.get("agent_action") == "defer")
 
-    out: dict[str, float] = {}
-    buckets = {b for (b, _) in by_bucket_cond}
-    for b in sorted(buckets):
+    buckets = sorted({b for (b, _) in by_bucket_cond})
+    conditions = {c for (_, c) in by_bucket_cond} - {"baseline"}
+    out: dict[str, dict[str, float]] = {}
+    for b in buckets:
         b_runs = by_bucket_cond.get((b, "baseline"), [])
-        v_runs = by_bucket_cond.get((b, "variance_aware"), [])
         p_b = sum(b_runs) / len(b_runs) if b_runs else float("nan")
-        p_v = sum(v_runs) / len(v_runs) if v_runs else float("nan")
-        out[b] = p_v - p_b
+        deltas: dict[str, float] = {}
+        for c in sorted(conditions):
+            c_runs = by_bucket_cond.get((b, c), [])
+            if not c_runs:
+                deltas[c] = float("nan")
+                continue
+            p_c = sum(c_runs) / len(c_runs)
+            deltas[c] = p_c - p_b
+        out[b] = deltas
     return out
 
 
@@ -157,9 +184,15 @@ def summarize_smoke(events: list[dict]) -> str:
         kv = ", ".join(f"{k}={v}" for k, v in sorted(ad.counts.items()))
         lines.append(f"  {ad.bucket:<22} {ad.condition:<16} n={ad.total:3d}  {kv}")
 
-    lines.append("differential abstention (variance_aware − baseline):")
-    for bucket, delta in sorted(differential_abstention(events).items()):
-        marker = "n/a" if math.isnan(delta) else f"{delta:+.2f}"
-        lines.append(f"  {bucket:<22} {marker}")
+    lines.append("differential abstention (condition − baseline):")
+    for bucket, deltas in sorted(differential_abstention(events).items()):
+        if not deltas:
+            lines.append(f"  {bucket:<22} (no non-baseline conditions)")
+            continue
+        parts = []
+        for cond, delta in sorted(deltas.items()):
+            marker = "n/a" if math.isnan(delta) else f"{delta:+.2f}"
+            parts.append(f"{cond}={marker}")
+        lines.append(f"  {bucket:<22} {', '.join(parts)}")
 
     return "\n".join(lines)

@@ -65,17 +65,31 @@ def test_differential_abstention_delta() -> None:
     from uagent.experiment.metrics import differential_abstention
 
     events = [
-        # bucket A: baseline defers 1/2 (0.5), variance defers 2/2 (1.0) → +0.5
+        # bucket A: baseline defers 1/2 (0.5); variance_aware defers 2/2
+        # (1.0) → +0.5; variance_aware_free defers 0/2 (0.0) → -0.5.
         _ev("A", "baseline", "defer"),
         _ev("A", "baseline", "move_forward"),
         _ev("A", "variance_aware", "defer"),
         _ev("A", "variance_aware", "defer"),
-        # bucket B: only baseline events → variance side is NaN → delta NaN
+        _ev("A", "variance_aware_free", "move_forward"),
+        _ev("A", "variance_aware_free", "look_around"),
+        # bucket B: only baseline events → all non-baseline deltas NaN.
         _ev("B", "baseline", "defer"),
+        # bucket C: variance_aware_free without baseline → NaN.
+        _ev("C", "variance_aware_free", "defer"),
     ]
     delta = differential_abstention(events)
-    assert delta["A"] == pytest.approx(0.5)
-    assert math.isnan(delta["B"])
+    assert delta["A"]["variance_aware"] == pytest.approx(0.5)
+    assert delta["A"]["variance_aware_free"] == pytest.approx(-0.5)
+    # bucket B has no non-baseline events in B itself, but the global set
+    # of non-baseline conditions is {variance_aware, variance_aware_free}.
+    # Both surface as NaN to keep the report shape stable.
+    assert math.isnan(delta["B"]["variance_aware"])
+    assert math.isnan(delta["B"]["variance_aware_free"])
+    # bucket C has variance_aware_free but no baseline → NaN delta.
+    assert math.isnan(delta["C"]["variance_aware_free"])
+    # variance_aware not present in C: stable shape, NaN.
+    assert math.isnan(delta["C"]["variance_aware"])
 
 
 def test_iter_events_skips_malformed(tmp_path: Path) -> None:

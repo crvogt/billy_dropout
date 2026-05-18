@@ -119,10 +119,26 @@ event partially compensate. Pre-flight verification per tier via
   filter in the OOD construction subsection — necessary for
   reproducibility.
 
-### III.D — Why the variance_aware prompt is explicit
+### III.D — Variance-aware conditions: directive vs free
 
-The variance_aware condition uses an explicit mechanical mapping from
-the calibrated interpretation label to a tool call (LOW →
+The experiment uses TWO variance-aware conditions, named here as in
+code: `variance_aware` (paper-facing name: **directive**) and
+`variance_aware_free` (**free**). Both receive the identical perception
+block — same `mean_confidence`, `epistemic_variance`, and calibrated
+LOW/MEDIUM/HIGH interpretation label — and differ only in the system
+prompt. The byte-identity of the perception block between the two is
+a controlled-comparison invariant pinned by
+`tests/test_agent.py::test_variance_free_perception_block_matches_directive`.
+
+The two conditions test different *propagation styles* for uncertainty
+into a small LLM agent: directive supplies a calibrated mechanical
+mapping the LLM executes; free supplies the same posterior and asks
+the LLM to exercise mission-framed discretion.
+
+#### III.D.1 — Why the directive prompt is explicit
+
+The variance_aware_directive condition uses an explicit mechanical
+mapping from the calibrated interpretation label to a tool call (LOW →
 `move_forward(distance_m=0.5)`; MEDIUM → `look_around()`; HIGH →
 `defer(reason=...)`; empty detection → `look_around()`). The
 prompt instructs the LLM to follow the mapping deterministically and
@@ -190,6 +206,76 @@ the Step B variance-distribution analysis (`runs/step_b/summary.json`)
 using the variance thresholds locked in III.C above; it is NOT a
 learned policy over the LLM's outputs.
 
+#### III.D.2 — Why the free prompt exists alongside directive
+
+The directive condition by construction reduces the LLM's role on a
+detection-present turn to executing a three-branch dispatch. A
+plausible methodological objection is that the comparison "directive
+vs baseline" therefore measures the calibrated mapping, not the LLM's
+ability to reason over uncertainty: a Python `if/elif` substituted
+for the LLM would yield similar abstention rates, and the LLM is
+present only to parse heterogeneous perception strings and emit
+schema-valid tool calls. (We address this directly in III.D.1's
+counter-position: the LLM's role under directive *is* operational
+parsing + tool-call emission, and that is a real contribution at
+small scales. But the objection persists.)
+
+The free condition exists to test the alternative propagation style.
+The agent receives the same MC Dropout posterior — `mean_confidence`,
+`epistemic_variance`, and the LOW/MEDIUM/HIGH interpretation label —
+under mission framing ("find a doorway, approach it, and pass
+through") and is told explicitly:
+
+> How you use these signals to choose an action is your decision.
+> There is no prescribed mapping from variance level to action.
+
+If the free condition produces signal-driven motion suppression on
+OOD comparable to the directive condition, the paper's headline
+contribution is strengthened: small LLMs *can* reason over a surfaced
+posterior given mission framing. If it does not, the directive-vs-
+free contrast itself is the contribution — it quantifies how much of
+the directive condition's behavior is attributable to the calibrated
+mapping rather than to the variance signal itself, and frames an
+explicit design recommendation for deployers ("propagate variance as
+a directive, not as information, when working at the 4B scale").
+
+The free vs directive comparison is the **Section V Discussion**
+methodological contribution (see V.A below). The headline Section IV
+result remains the differential abstention between variance-aware
+(either variant) and baseline.
+
+**Tool-surface asymmetry between directive and free (methodological
+caveat).** The directive prompt instructs the agent that `rotate` and
+`report` are available but must not be used in this condition,
+effectively restricting the action set to `{move_forward, look_around,
+defer}`. The free prompt allows all five tools. This asymmetry exists
+because the directive prompt's mapping is exhaustive over the three
+gate levels + empty-detection case and any additional tools would be
+ambiguous; the free prompt cannot ban tools it isn't prescribing the
+use of. The asymmetry is not a confound on the headline P(defer | OOD)
+metric — `rotate` and `report` are not abstain actions and are
+relatively rare in the free condition — but it does mean that any
+"directive matches free on full action distribution" claim must be
+reported on the move-vs-non-commit subset, treating
+`{rotate, report, look_around, defer}` as a single non-commit bucket.
+Methods text and Results plots that compare action distributions
+across conditions should adopt the move-vs-non-commit collapse and
+state it explicitly.
+
+#### III.D.3 — Replicability of the perception block across the two variance conditions
+
+Because the MC Dropout posterior is stochastic (K=20 forward passes with
+training-mode dropouts), the perception block is identical *given the
+same Posterior input* but the Posterior itself depends on torch RNG
+state, which advances across calls. The two variance conditions on the
+same `(image_path, trial_index)` therefore see slightly different
+posteriors unless the run pipeline either (a) snapshots and replays the
+directive run's posteriors for the free run, or (b) seeds the perceiver
+deterministically per event. The current implementation does neither;
+the methodological note in this subsection must be filled in once the
+project lead decides which approach to use, or the per-event posterior
+disagreement is reported as a methodological limitation in V.B.
+
 ## Section IV — Results
 
 **Panel C from Step B (`runs/step_b/panel_c.png`) is the gate-check
@@ -201,11 +287,18 @@ ID-confident-correct rarely reaches.
 
 Headline Results in Section IV are still about *agent behavior* (the
 core experimental contribution, generated in Steps E and F):
-differential abstention rates between baseline and variance_aware
-conditions, gate-variance correlation within OOD, action correctness
-against expected actions per bucket. Panels A–D from Step B are
-supporting evidence for the perception-side prerequisites, not the
-headline finding.
+differential abstention rates between baseline and the variance-aware
+conditions (directive and free; see III.D), gate-variance correlation
+within OOD, action correctness against expected actions per bucket.
+Panels A–D from Step B are supporting evidence for the perception-side
+prerequisites, not the headline finding.
+
+With three conditions in flight, IV tables must report the
+condition-specific deltas explicitly:
+`P(defer | OOD, variance_aware_directive) − P(defer | OOD, baseline)`
+and `P(defer | OOD, variance_aware_free) − P(defer | OOD, baseline)`.
+The directive–free delta itself is the V.A contribution; in IV it is
+reported as a derived row rather than the headline.
 
 ## Section V — Discussion
 
@@ -252,6 +345,58 @@ Per-source T would partially repair the DoorDetect-specific gap, but
 that solution presumes the deployment system can identify source
 membership at inference time. For genuinely OOD inputs (the case the
 paper is built around), source identity is precisely the unknown.
+
+### V.A — Directive vs free propagation of uncertainty (added 2026-05-17)
+
+The two variance-aware conditions (directive and free; see III.D)
+together address a methodological question the paper would otherwise
+leave open: **when propagating a calibrated uncertainty signal into a
+small LLM agent, is the right interface a hard rule the model executes,
+or information the model reasons over discretionarily?**
+
+The directive condition operationalizes uncertainty as a calibrated
+mapping the LLM is instructed to follow. The free condition propagates
+the same posterior but withholds the mapping, framing the choice as a
+mission-aware judgment. The headline differential against baseline
+(P(defer | OOD)) is reported for both conditions; the directive–free
+delta is what speaks to the propagation-style question.
+
+Three possible outcomes and their interpretations:
+
+1. **Free ≈ directive on the headline metrics.** Small LLMs can reason
+   over a surfaced posterior given mission framing — the directive's
+   mapping is a sufficiency demonstration but not a necessity. The
+   paper's deployment recommendation is "surface the posterior; mapping
+   is optional, not load-bearing."
+
+2. **Free < directive on the headline metrics.** Mission framing alone
+   is insufficient at this scale; the calibrated mapping is doing the
+   work. The paper recommends propagating uncertainty as a directive,
+   not as information, when working at the 4B–26B scale. This is the
+   most likely outcome consistent with the 2026-05-13 pilot
+   (Section III.D.1).
+
+3. **Free > directive on the headline metrics** (motion-rate retained
+   on ID while OOD abstention is matched). Less likely; if observed,
+   warrants follow-up because it suggests the directive's hard mapping
+   is over-suppressing ID motion in ways the free condition's
+   discretion avoids.
+
+The interpretation reported in V.A must include the **reasoning chain
+analysis under free**: chains that reference the calibrated label
+("LOW variance ... I will move") versus chains that reason over the
+mission ("doorway visible, approach"). The chain composition tells a
+deployer whether free is succeeding because the LLM is doing what
+directive prescribes anyway, or because it is genuinely composing the
+posterior with the mission state.
+
+**Confound to acknowledge:** the free condition's tool surface is a
+superset of the directive's (free allows all five tools; directive
+restricts to three — see III.D.2). The directive-vs-free action-
+distribution comparison must collapse non-commit actions
+(`rotate`, `report`, `look_around`, `defer`) into a single bucket to
+remain interpretable. The headline P(defer | OOD) is unaffected, but
+secondary distribution tables must adopt the collapse and state it.
 
 **This motivates the variance signal as an alternative path to the
 same problem.** Rather than try to predict the right temperature for

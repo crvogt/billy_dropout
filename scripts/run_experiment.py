@@ -182,6 +182,19 @@ def main() -> None:
         )
     llm_default_tag = llm_models_by_tier[llm_default_tier]
 
+    # Fail loudly on an unknown condition BEFORE any side-effect (mkdir,
+    # test-set build, GPU model load). A typo in
+    # configs/default.yaml::experiment.conditions would otherwise surface
+    # as a KeyError deep in the run loop after a non-trivial setup cost.
+    from uagent.agent.prompts import ALL_CONDITIONS  # noqa: E402  (lazy import)
+
+    unknown_conditions = set(conditions) - set(ALL_CONDITIONS)
+    if unknown_conditions:
+        sys.exit(
+            f"unknown condition(s) in config: {sorted(unknown_conditions)}. "
+            f"Allowed: {list(ALL_CONDITIONS)}"
+        )
+
     # CLI args always override config; --smoke just changes the default fill-ins.
     if args.smoke:
         n_per_bucket = args.n_per_bucket if args.n_per_bucket is not None else 5
@@ -275,7 +288,10 @@ def main() -> None:
     git_sha_str = git_sha(repo_root)
     scaler = TemperatureScaler(temperature=T)
 
-    # Build perceivers per condition (reused across trials/images)
+    # Build perceivers per perceiver kind (deterministic vs MC Dropout).
+    # The two variance-aware conditions share one MCDropoutYOLO instance
+    # to avoid a redundant GPU load — the detection block they produce
+    # is byte-identical; only the system prompt differs downstream.
     print("loading perceivers...")
     perceivers: dict[str, CalibratedPerceiver] = {}
     if "baseline" in conditions:
@@ -287,7 +303,14 @@ def main() -> None:
             device=device,
         )
         perceivers["baseline"] = CalibratedPerceiver(det, scaler)
-    if "variance_aware" in conditions:
+    # variance_aware and variance_aware_free share the same MC Dropout
+    # perceiver — the detection block they produce is byte-identical,
+    # the conditions differ only in the system prompt. One MCDropoutYOLO
+    # is built and shared across both keys to avoid two GPU loads.
+    variance_conditions = [
+        c for c in conditions if c in ("variance_aware", "variance_aware_free")
+    ]
+    if variance_conditions:
         mc = MCDropoutYOLO(
             weights_path=dropout_weights,
             K=K,
@@ -302,7 +325,9 @@ def main() -> None:
                 "MC Dropout cannot produce variance. Re-train via "
                 "scripts/train_dropout_yolo.py."
             )
-        perceivers["variance_aware"] = CalibratedPerceiver(mc, scaler)
+        shared = CalibratedPerceiver(mc, scaler)
+        for c in variance_conditions:
+            perceivers[c] = shared
 
     user_command = (
         "Detection from the front camera follows. Decide your next action."
